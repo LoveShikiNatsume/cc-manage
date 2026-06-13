@@ -1,0 +1,8 @@
+{"timestamp":"2026-06-04T05:38:46.641Z","type":"session_meta","payload":{"id":"019e9124-2875-72f2-bda8-2060565c8e68","timestamp":"2026-06-04T05:38:46.517Z","cwd":"/home/user/project","source":"vscode","cli_version":"0.133.0"}}
+{"timestamp":"2026-06-04T05:38:46.652Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-06-04T05:39:01.618Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox stuff</permissions instructions>"}]}}
+{"timestamp":"2026-06-04T05:39:01.618Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/user/project\n\nKeep it clean."}]}}
+{"timestamp":"2026-06-04T05:39:01.619Z","type":"turn_context","payload":{"turn_id":"abc","cwd":"/home/user/project","model":"gpt-5.5"}}
+{"timestamp":"2026-06-04T05:39:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login bug on the settings page"}]}}
+{"timestamp":"2026-06-04T05:39:10.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll fix the login bug now."}]}}
+{"timestamp":"2026-06-04T05:40:00.000Z","type":"event_msg","payload":{"type":"task_completed"}}

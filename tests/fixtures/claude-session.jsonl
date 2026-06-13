@@ -1,0 +1,6 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-01T02:40:05.900Z","sessionId":"54e98281-0ab1-465a-9293-8cf7055c5c1f"}
+{"type":"queue-operation","operation":"dequeue","timestamp":"2026-06-01T02:40:05.915Z","sessionId":"54e98281-0ab1-465a-9293-8cf7055c5c1f"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Help me refactor the auth module"}]},"cwd":"/home/user/myproject","timestamp":"2026-06-01T02:40:06.000Z","sessionId":"54e98281-0ab1-465a-9293-8cf7055c5c1f"}
+{"parentUuid":"abc","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help you refactor the auth module."}]},"timestamp":"2026-06-01T02:41:00.000Z"}
+{"parentUuid":"def","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Looks good, please continue"}]},"timestamp":"2026-06-01T02:42:00.000Z"}
+{"parentUuid":"ghi","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done with the refactoring."}]},"timestamp":"2026-06-01T02:43:00.000Z"}
