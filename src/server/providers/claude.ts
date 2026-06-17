@@ -22,6 +22,23 @@ async function validatePath(filePath: string, configDir?: string): Promise<void>
   }
 }
 
+async function readClaudeSessionId(filePath: string): Promise<string | null> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (typeof obj.sessionId === 'string') return obj.sessionId;
+      if (obj.type === 'queue-operation' && typeof obj.sessionId === 'string') {
+        return obj.sessionId;
+      }
+    } catch {
+      // Ignore malformed JSONL rows.
+    }
+  }
+  return null;
+}
+
 export async function discoverClaudeSessions(configDir?: string): Promise<SessionMeta[]> {
   const baseDir = configDir ?? getClaudeConfigDir();
   const projectsDir = path.join(baseDir, 'projects');
@@ -110,9 +127,11 @@ export async function renameClaudeSession(
 ): Promise<void> {
   await validatePath(filePath, configDir);
 
+  const sessionId = await readClaudeSessionId(filePath);
   const entry = {
     type: 'custom-title',
-    title,
+    ...(sessionId ? { sessionId } : {}),
+    customTitle: title,
     timestamp: new Date().toISOString(),
   };
 

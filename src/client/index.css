@@ -6,3 +6,74 @@
   --color-success: #22c55e;
   --color-warning: #f59e0b;
 }
+
+.markdown-view {
+  overflow-wrap: anywhere;
+  line-height: 1.65;
+}
+
+.markdown-view > :first-child {
+  margin-top: 0;
+}
+
+.markdown-view > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-view p,
+.markdown-view ul,
+.markdown-view ol,
+.markdown-view pre,
+.markdown-view table,
+.markdown-view blockquote {
+  margin: 0.65rem 0;
+}
+
+.markdown-view-compact p,
+.markdown-view-compact ul,
+.markdown-view-compact ol,
+.markdown-view-compact pre,
+.markdown-view-compact table,
+.markdown-view-compact blockquote {
+  margin: 0.4rem 0;
+}
+
+.markdown-view h1,
+.markdown-view h2,
+.markdown-view h3 {
+  margin: 0.9rem 0 0.45rem;
+  font-weight: 650;
+  line-height: 1.25;
+  color: #111827;
+}
+
+.markdown-view h1 {
+  font-size: 1.25rem;
+}
+
+.markdown-view h2 {
+  font-size: 1.1rem;
+}
+
+.markdown-view h3 {
+  font-size: 1rem;
+}
+
+.markdown-view ul,
+.markdown-view ol {
+  padding-left: 1.25rem;
+}
+
+.markdown-view ul {
+  list-style: disc;
+}
+
+.markdown-view ol {
+  list-style: decimal;
+}
+
+.markdown-view blockquote {
+  border-left: 3px solid #d1d5db;
+  color: #4b5563;
+  padding-left: 0.75rem;
+}

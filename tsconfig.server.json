@@ -14,5 +14,5 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/server", "src/shared", "bin"]
+  "include": ["src/server", "src/electron", "src/shared", "bin"]
 }

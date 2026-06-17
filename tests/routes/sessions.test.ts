@@ -188,7 +188,7 @@ describe('PATCH /api/sessions/:provider/:id', () => {
     await app.close();
   });
 
-  it('returns 400 when trying to rename a Codex session', async () => {
+  it('renames a Codex session', async () => {
     const app = createApp();
     await app.ready();
 
@@ -200,7 +200,21 @@ describe('PATCH /api/sessions/:provider/:id', () => {
       payload: { title: 'New Title' },
     });
 
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    const listRes = await app.inject({ method: 'GET', url: '/api/sessions' });
+    const body = listRes.json();
+    const codexGroup = body.find((g: any) => g.provider === 'codex');
+    const session = codexGroup.projects[0].sessions[0];
+    expect(session.title).toBe('New Title');
+
+    const lines = (await fs.readFile(codexSessionFile, 'utf-8')).split('\n').filter(Boolean);
+    const lastLine = JSON.parse(lines[lines.length - 1]);
+    expect(lastLine.type).toBe('event_msg');
+    expect(lastLine.payload.type).toBe('thread_name_updated');
+    expect(lastLine.payload.thread_name).toBe('New Title');
+
     await app.close();
   });
 

@@ -2,10 +2,13 @@
   "name": "cc-manage",
   "version": "0.1.0",
   "type": "module",
+  "main": "dist/electron/main.js",
   "bin": {
     "cc-manage": "./dist/bin/cc-manage.js"
   },
-  "files": ["dist/"],
+  "files": [
+    "dist/"
+  ],
   "scripts": {
     "dev": "concurrently \"vite\" \"tsx watch src/server/index.ts\"",
     "dev:server": "tsx watch src/server/index.ts",
@@ -13,35 +16,83 @@
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsup",
+    "desktop:dev": "node scripts/desktop-dev.mjs",
+    "desktop:pack": "node scripts/desktop-package.mjs --dir",
+    "desktop:dist": "node scripts/desktop-package.mjs",
+    "desktop:dist:win": "node scripts/desktop-package.mjs --win nsis zip",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "build": {
+    "appId": "app.ccmanage.desktop",
+    "productName": "cc-manage",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "npmRebuild": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
   "dependencies": {
-    "fastify": "^5.0.0",
-    "@fastify/static": "^8.0.0",
     "@fastify/cors": "^10.0.0",
-    "better-sqlite3": "^11.0.0",
-    "gray-matter": "^4.0.3"
+    "@fastify/static": "^8.0.0",
+    "better-sqlite3": "^12.11.1",
+    "fastify": "^5.0.0",
+    "gray-matter": "^4.0.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.0.0",
+    "@tailwindcss/vite": "^4.0.0",
     "@types/better-sqlite3": "^7.6.0",
-    "tsup": "^8.0.0",
-    "tsx": "^4.0.0",
-    "concurrently": "^9.0.0",
-    "vite": "^6.0.0",
-    "@vitejs/plugin-react": "^4.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "react-router-dom": "^7.0.0",
-    "tailwindcss": "^4.0.0",
-    "@tailwindcss/vite": "^4.0.0",
-    "vitest": "^3.0.0",
-    "lucide-react": "^0.460.0",
+    "@vitejs/plugin-react": "^4.0.0",
     "clsx": "^2.1.0",
-    "tailwind-merge": "^3.0.0"
+    "concurrently": "^9.0.0",
+    "electron": "^41.7.1",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^0.460.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
+    "tailwind-merge": "^3.0.0",
+    "tailwindcss": "^4.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   }
 }

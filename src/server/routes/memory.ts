@@ -7,6 +7,7 @@ import {
   createMemory,
   updateMemory,
   deleteMemory,
+  rebuildMemoryIndex,
 } from '../services/memory-manager.js';
 import { listCodexMemories } from '../services/codex-memory.js';
 
@@ -99,6 +100,28 @@ export const memoryRoutes: FastifyPluginAsync<MemoryPluginOptions> = async (
         claudeConfigDir,
       );
       return reply.status(201).send({ ok: true });
+    } catch (err) {
+      return reply
+        .status(500)
+        .send({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/memory/claude/:project/index/rebuild — regenerate MEMORY.md
+  app.post<{
+    Params: { project: string };
+  }>('/api/memory/claude/:project/index/rebuild', async (req, reply) => {
+    const { project } = req.params;
+    const projects = await listMemoryProjects(claudeConfigDir);
+    const found = projects.find(p => p.project === project);
+    if (!found) {
+      return reply.status(404).send({ error: 'Project not found' });
+    }
+
+    const memDir = path.join(found.projectDir, 'memory');
+    try {
+      await rebuildMemoryIndex(memDir, claudeConfigDir);
+      return reply.send({ ok: true });
     } catch (err) {
       return reply
         .status(500)

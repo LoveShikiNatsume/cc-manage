@@ -9,6 +9,7 @@ import {
   createMemory,
   updateMemory,
   deleteMemory,
+  rebuildMemoryIndex,
 } from '../src/server/services/memory-manager.js';
 
 let tmpDir: string;
@@ -56,8 +57,9 @@ describe('listMemoryProjects', () => {
     expect(projects.length).toBe(1);
     expect(projects[0].project).toBe('myproject');
     expect(projects[0].projectDir).toBe(projectDir);
-    expect(projects[0].memories.length).toBe(1);
-    expect(projects[0].memories[0].filename).toBe('user-role.md');
+    expect(projects[0].memories.length).toBe(2);
+    expect(projects[0].memories[0].filename).toBe('MEMORY.md');
+    expect(projects[0].memories[1].filename).toBe('user-role.md');
   });
 
   it('returns empty array when projects directory does not exist', async () => {
@@ -78,29 +80,32 @@ describe('listMemoryProjects', () => {
     expect(projects[0].project).toBe('myproject');
   });
 
-  it('does not include MEMORY.md in the memory list', async () => {
+  it('includes MEMORY.md in the memory list', async () => {
     const projects = await listMemoryProjects(configDir);
     const filenames = projects[0].memories.map(m => m.filename);
-    expect(filenames).not.toContain('MEMORY.md');
+    expect(filenames).toContain('MEMORY.md');
   });
 });
 
 describe('listMemories', () => {
-  it('lists .md files in the memory dir, skipping MEMORY.md', async () => {
+  it('lists .md files in the memory dir, including MEMORY.md first', async () => {
     const memories = await listMemories(memoryDir, configDir);
-    expect(memories.length).toBe(1);
-    expect(memories[0].filename).toBe('user-role.md');
-    expect(memories[0].name).toBe('user-role');
-    expect(memories[0].description).toBe('User is a backend engineer');
-    expect(memories[0].type).toBe('user');
+    expect(memories.length).toBe(2);
+    expect(memories[0].filename).toBe('MEMORY.md');
+    expect(memories[0].type).toBe('index');
+    expect(memories[1].filename).toBe('user-role.md');
+    expect(memories[1].name).toBe('user-role');
+    expect(memories[1].description).toBe('User is a backend engineer');
+    expect(memories[1].type).toBe('user');
   });
 
-  it('returns empty array when memory dir is empty (only MEMORY.md)', async () => {
+  it('returns the index when memory dir is empty (only MEMORY.md)', async () => {
     const emptyMemDir = path.join(projectsDir, 'emptyproj', 'memory');
     await fs.mkdir(emptyMemDir, { recursive: true });
     await fs.writeFile(path.join(emptyMemDir, 'MEMORY.md'), '', 'utf-8');
     const memories = await listMemories(emptyMemDir, configDir);
-    expect(memories).toEqual([]);
+    expect(memories).toHaveLength(1);
+    expect(memories[0].filename).toBe('MEMORY.md');
   });
 
   it('rejects paths outside config dir', async () => {
@@ -187,6 +192,23 @@ User prefers Rust now.
     expect(read).toBe(newContent);
   });
 
+  it('updates MEMORY.md index when frontmatter description changes', async () => {
+    const filePath = path.join(memoryDir, 'user-role.md');
+    const newContent = `---
+name: user-role
+description: Updated description
+metadata:
+  type: user
+---
+
+User prefers Rust now.
+`;
+    await updateMemory(filePath, newContent, configDir);
+
+    const indexContent = await fs.readFile(path.join(memoryDir, 'MEMORY.md'), 'utf-8');
+    expect(indexContent).toContain('user-role.md: Updated description');
+  });
+
   it('rejects paths outside config dir', async () => {
     await expect(updateMemory('/tmp/evil.md', 'content', configDir)).rejects.toThrow();
   });
@@ -209,5 +231,23 @@ describe('deleteMemory', () => {
 
   it('rejects file paths outside config dir', async () => {
     await expect(deleteMemory('/tmp/evil.md', memoryDir, configDir)).rejects.toThrow();
+  });
+
+  it('does not delete MEMORY.md', async () => {
+    await expect(
+      deleteMemory(path.join(memoryDir, 'MEMORY.md'), memoryDir, configDir),
+    ).rejects.toThrow('MEMORY.md');
+  });
+});
+
+describe('rebuildMemoryIndex', () => {
+  it('rebuilds MEMORY.md from detailed memory files', async () => {
+    await fs.writeFile(path.join(memoryDir, 'MEMORY.md'), 'stale\n', 'utf-8');
+
+    await rebuildMemoryIndex(memoryDir, configDir);
+
+    const indexContent = await fs.readFile(path.join(memoryDir, 'MEMORY.md'), 'utf-8');
+    expect(indexContent).toContain('user-role.md: User is a backend engineer');
+    expect(indexContent).not.toContain('stale');
   });
 });

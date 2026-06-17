@@ -20,6 +20,15 @@ async function validatePath(filePath: string, configDir?: string): Promise<void>
 
 function parseMeta(filePath: string, data: Record<string, unknown>): MemoryFileMeta {
   const filename = path.basename(filePath);
+  if (filename === 'MEMORY.md') {
+    return {
+      filename,
+      name: 'MEMORY',
+      description: 'Project memory index',
+      type: 'index',
+    };
+  }
+
   const metadata = data.metadata as Record<string, unknown> | undefined;
   return {
     filename,
@@ -88,7 +97,6 @@ export async function listMemories(
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     if (!entry.name.endsWith('.md')) continue;
-    if (entry.name === 'MEMORY.md') continue;
 
     const filePath = path.join(memoryDir, entry.name);
     try {
@@ -106,7 +114,11 @@ export async function listMemories(
     }
   }
 
-  return results;
+  return results.sort((a, b) => {
+    if (a.filename === 'MEMORY.md') return -1;
+    if (b.filename === 'MEMORY.md') return 1;
+    return a.filename.localeCompare(b.filename);
+  });
 }
 
 export async function readMemory(
@@ -159,6 +171,18 @@ export async function updateMemory(
 ): Promise<void> {
   await validatePath(filePath, configDir);
   await fs.writeFile(filePath, rawContent, 'utf-8');
+
+  const filename = path.basename(filePath);
+  if (filename !== 'MEMORY.md') {
+    const parsed = matter(rawContent);
+    const meta = parseMeta(filePath, parsed.data);
+    await updateMemoryIndex(
+      path.dirname(filePath),
+      filename,
+      meta.description || meta.name,
+      'add',
+    );
+  }
 }
 
 export async function deleteMemory(
@@ -169,8 +193,46 @@ export async function deleteMemory(
   await validatePath(filePath, configDir);
 
   const filename = path.basename(filePath);
+  if (filename === 'MEMORY.md') {
+    throw new Error('MEMORY.md is the project index and cannot be deleted');
+  }
+
   await fs.unlink(filePath);
   await updateMemoryIndex(memoryDir, filename, '', 'remove');
+}
+
+export async function rebuildMemoryIndex(
+  memoryDir: string,
+  configDir?: string,
+): Promise<void> {
+  await validatePath(memoryDir, configDir);
+
+  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  try {
+    entries = await fs.readdir(memoryDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  const lines: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!entry.name.endsWith('.md')) continue;
+    if (entry.name === 'MEMORY.md') continue;
+
+    const filePath = path.join(memoryDir, entry.name);
+    try {
+      const raw = await fs.readFile(filePath, 'utf-8');
+      const parsed = matter(raw);
+      const meta = parseMeta(filePath, parsed.data);
+      lines.push(`- ${entry.name}: ${meta.description || meta.name}`);
+    } catch {
+      lines.push(`- ${entry.name}: ${entry.name.replace(/\.md$/, '')}`);
+    }
+  }
+
+  lines.sort((a, b) => a.localeCompare(b));
+  await fs.writeFile(path.join(memoryDir, 'MEMORY.md'), `${lines.join('\n')}\n`, 'utf-8');
 }
 
 async function updateMemoryIndex(
@@ -202,6 +264,10 @@ async function updateMemoryIndex(
   }
 
   // Remove trailing empty lines, then add a final newline
-  const content = filtered.join('\n').replace(/\n+$/, '') + '\n';
+  const body = filtered.filter((line, index, arr) => {
+    if (line.trim()) return true;
+    return index !== arr.length - 1;
+  });
+  const content = body.join('\n').replace(/\n+$/, '') + '\n';
   await fs.writeFile(indexPath, content, 'utf-8');
 }

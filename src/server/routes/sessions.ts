@@ -10,7 +10,13 @@ import {
   discoverCodexSessions,
   getCodexMessages,
   deleteCodexSession,
+  renameCodexSession,
 } from '../providers/codex.js';
+import {
+  deleteClaudeSessionMessages,
+  repairClaudeSessionFile,
+  scanClaudeRepairIssues,
+} from '../services/claude-repair.js';
 
 interface SessionsPluginOptions {
   claudeConfigDir?: string;
@@ -86,6 +92,41 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     return reply.send(grouped);
   });
 
+  // GET /api/sessions/claude/repair-scan
+  app.get('/api/sessions/claude/repair-scan', async (_req, reply) => {
+    const issues = await scanClaudeRepairIssues(claudeConfigDir);
+    return reply.send(issues);
+  });
+
+  // POST /api/sessions/claude/repair-all
+  app.post('/api/sessions/claude/repair-all', async (_req, reply) => {
+    const body = _req.body as { backup?: boolean } | undefined;
+    const issues = await scanClaudeRepairIssues(claudeConfigDir);
+    const results = [];
+
+    for (const issue of issues) {
+      try {
+        results.push(await repairClaudeSessionFile(issue.filePath, {
+          configDir: claudeConfigDir,
+          backup: body?.backup,
+        }));
+      } catch (err) {
+        results.push({
+          ok: false,
+          filePath: issue.filePath,
+          mainNodes: 0,
+          relinked: 0,
+          inserted: 0,
+          droppedOrphans: 0,
+          leaf: null,
+          error: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    }
+
+    return reply.send({ results });
+  });
+
   // GET /api/sessions/:provider/:id/messages
   app.get<{
     Params: { provider: string; id: string };
@@ -111,7 +152,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     }
   });
 
-  // PATCH /api/sessions/:provider/:id — rename (Claude only)
+  // PATCH /api/sessions/:provider/:id — rename
   app.patch<{
     Params: { provider: string; id: string };
     Body: { title: string };
@@ -123,18 +164,91 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
       return reply.status(400).send({ error: 'title is required' });
     }
 
-    if (provider !== 'claude') {
-      return reply.status(400).send({ error: 'Rename is only supported for Claude sessions' });
-    }
-
     const entry = sessionMap.get(sessionKey(provider as Provider, id));
     if (!entry) {
       return reply.status(404).send({ error: 'Session not found' });
     }
 
     try {
-      await renameClaudeSession(entry.filePath, title, claudeConfigDir);
+      if (entry.provider === 'claude') {
+        await renameClaudeSession(entry.filePath, title, claudeConfigDir);
+      } else {
+        await renameCodexSession(entry.filePath, title, codexConfigDir);
+      }
       return reply.send({ ok: true });
+    } catch (err) {
+      return reply
+        .status(500)
+        .send({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/sessions/:provider/:id/repair — repair hidden Claude branches
+  app.post<{
+    Params: { provider: string; id: string };
+    Body: { backup?: boolean };
+  }>('/api/sessions/:provider/:id/repair', async (req, reply) => {
+    const { provider, id } = req.params;
+
+    if (provider !== 'claude') {
+      return reply.status(400).send({ error: 'Repair is only supported for Claude sessions' });
+    }
+
+    let entry = sessionMap.get(sessionKey(provider as Provider, id));
+    if (!entry) {
+      await refreshSessionMap(claudeConfigDir, codexConfigDir);
+      entry = sessionMap.get(sessionKey(provider as Provider, id));
+    }
+    if (!entry) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    try {
+      const result = await repairClaudeSessionFile(entry.filePath, {
+        configDir: claudeConfigDir,
+        backup: req.body?.backup,
+      });
+      return reply.send(result);
+    } catch (err) {
+      return reply
+        .status(500)
+        .send({ error: err instanceof Error ? err.message : 'Unknown error' });
+    }
+  });
+
+  // POST /api/sessions/:provider/:id/messages/delete — delete selected Claude messages safely
+  app.post<{
+    Params: { provider: string; id: string };
+    Body: { messageIds: string[]; backup?: boolean };
+  }>('/api/sessions/:provider/:id/messages/delete', async (req, reply) => {
+    const { provider, id } = req.params;
+    const { messageIds } = req.body ?? {};
+
+    if (provider !== 'claude') {
+      return reply
+        .status(400)
+        .send({ error: 'Message deletion is currently only supported for Claude sessions' });
+    }
+
+    if (!Array.isArray(messageIds) || messageIds.some(item => typeof item !== 'string')) {
+      return reply.status(400).send({ error: 'messageIds must be a string array' });
+    }
+
+    let entry = sessionMap.get(sessionKey(provider as Provider, id));
+    if (!entry) {
+      await refreshSessionMap(claudeConfigDir, codexConfigDir);
+      entry = sessionMap.get(sessionKey(provider as Provider, id));
+    }
+    if (!entry) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    try {
+      const result = await deleteClaudeSessionMessages(entry.filePath, messageIds, {
+        configDir: claudeConfigDir,
+        backup: req.body?.backup,
+      });
+      return reply.send(result);
     } catch (err) {
       return reply
         .status(500)

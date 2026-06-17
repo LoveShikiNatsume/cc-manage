@@ -122,7 +122,8 @@ describe('renameClaudeSession', () => {
     const parsed = JSON.parse(lastLine);
 
     expect(parsed.type).toBe('custom-title');
-    expect(parsed.title).toBe('My New Title');
+    expect(parsed.customTitle).toBe('My New Title');
+    expect(parsed.sessionId).toBe('test-session-001');
     expect(typeof parsed.timestamp).toBe('string');
   });
 

@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import Database from 'better-sqlite3';
 import type { SessionMeta, SessionMessage } from '@shared/types.js';
 import {
   readHeadTail,
@@ -20,6 +21,50 @@ async function validatePath(filePath: string, configDir?: string): Promise<void>
       `Path "${filePath}" is outside the Codex config directory "${baseDir}"`,
     );
   }
+}
+
+async function readCodexSessionId(filePath: string): Promise<string | null> {
+  const content = await fs.readFile(filePath, 'utf-8');
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      if (obj.type === 'session_meta' && typeof obj.payload?.id === 'string') {
+        return obj.payload.id;
+      }
+    } catch {
+      // Ignore malformed JSONL rows.
+    }
+  }
+  return null;
+}
+
+function readCodexThreadTitles(configDir?: string): Map<string, string> {
+  const baseDir = configDir ?? getCodexConfigDir();
+  const dbPath = path.join(baseDir, 'state_5.sqlite');
+  const titles = new Map<string, string>();
+
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(dbPath, { readonly: true });
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='threads'")
+      .get();
+    if (!table) return titles;
+
+    const rows = db
+      .prepare("SELECT id, title FROM threads WHERE title IS NOT NULL AND title <> ''")
+      .all() as Array<{ id: string; title: string }>;
+    for (const row of rows) {
+      titles.set(row.id, row.title);
+    }
+  } catch {
+    return titles;
+  } finally {
+    db?.close();
+  }
+
+  return titles;
 }
 
 // Recursively collect *.jsonl files from a directory
@@ -68,6 +113,7 @@ function isSubagentSession(headLines: string[]): boolean {
 
 export async function discoverCodexSessions(configDir?: string): Promise<SessionMeta[]> {
   const baseDir = configDir ?? getCodexConfigDir();
+  const threadTitles = readCodexThreadTitles(baseDir);
 
   const scanDirs = [
     path.join(baseDir, 'sessions'),
@@ -94,6 +140,8 @@ export async function discoverCodexSessions(configDir?: string): Promise<Session
         if (isSubagentSession(headLines)) continue;
 
         const meta = extractCodexSessionMeta(headLines, tailLines, filePath);
+        const indexedTitle = threadTitles.get(meta.id);
+        if (indexedTitle) meta.title = indexedTitle;
         sessions.push(meta);
       } catch {
         // Skip unreadable files
@@ -122,4 +170,77 @@ export async function deleteCodexSession(
   await validatePath(filePath, configDir);
   // Remove JSONL file only (no sidecar for Codex)
   await fs.unlink(filePath);
+}
+
+export async function renameCodexSession(
+  filePath: string,
+  title: string,
+  configDir?: string,
+): Promise<void> {
+  await validatePath(filePath, configDir);
+
+  const baseDir = configDir ?? getCodexConfigDir();
+  const id = await readCodexSessionId(filePath);
+  if (!id) {
+    throw new Error('Could not find Codex session id');
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const nowMs = now.getTime();
+  const nowSec = Math.floor(nowMs / 1000);
+
+  const event = {
+    timestamp: nowIso,
+    type: 'event_msg',
+    payload: {
+      type: 'thread_name_updated',
+      thread_id: id,
+      thread_name: title,
+    },
+  };
+
+  await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, 'utf-8');
+
+  const indexPath = path.join(baseDir, 'session_index.jsonl');
+  const indexEntry = {
+    id,
+    thread_name: title,
+    updated_at: nowIso,
+  };
+  await fs.appendFile(indexPath, `${JSON.stringify(indexEntry)}\n`, 'utf-8');
+
+  const statePath = path.join(baseDir, 'state_5.sqlite');
+  try {
+    await fs.access(statePath);
+  } catch {
+    return;
+  }
+
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(statePath);
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='threads'")
+      .get();
+    if (!table) return;
+
+    db.prepare(
+      `UPDATE threads
+       SET title = @title,
+           updated_at = @updatedAt,
+           updated_at_ms = @updatedAtMs
+       WHERE id = @id OR rollout_path = @filePath`,
+    ).run({
+      id,
+      filePath,
+      title,
+      updatedAt: nowSec,
+      updatedAtMs: nowMs,
+    });
+  } catch {
+    // Older Codex installs may not have state_5.sqlite; JSONL updates still work.
+  } finally {
+    db?.close();
+  }
 }

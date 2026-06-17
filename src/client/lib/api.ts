@@ -5,18 +5,20 @@ import type {
   MemoryFileContent,
   CodexMemoryEntry,
   ProviderUsage,
+  ClaudeRepairIssue,
+  ClaudeRepairResult,
+  ClaudeMessageDeleteResult,
+  ClaudeArtifactsOverview,
+  ClaudeArtifactContent,
+  ClaudeArtifactDeleteResult,
 } from '@shared/types';
 
 const BASE = '/api';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers ?? {}),
-    },
-  });
+  const headers: Record<string, string> = { ...(options?.headers as Record<string, string> ?? {}) };
+  if (options?.body) headers['Content-Type'] = 'application/json';
+  const res = await fetch(`${BASE}${url}`, { ...options, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`API error ${res.status}: ${text}`);
@@ -47,6 +49,38 @@ export const batchDeleteSessions = (ids: { provider: string; id: string }[]): Pr
   request('/sessions/batch-delete', {
     method: 'POST',
     body: JSON.stringify({ ids }),
+  });
+
+export const scanClaudeRepairs = (): Promise<ClaudeRepairIssue[]> =>
+  request('/sessions/claude/repair-scan');
+
+export const repairSession = (
+  provider: string,
+  id: string,
+  backup = true,
+): Promise<ClaudeRepairResult> =>
+  request(`/sessions/${provider}/${encodeURIComponent(id)}/repair`, {
+    method: 'POST',
+    body: JSON.stringify({ backup }),
+  });
+
+export const repairAllClaudeSessions = (
+  backup = true,
+): Promise<{ results: ClaudeRepairResult[] }> =>
+  request('/sessions/claude/repair-all', {
+    method: 'POST',
+    body: JSON.stringify({ backup }),
+  });
+
+export const deleteSessionMessages = (
+  provider: string,
+  id: string,
+  messageIds: string[],
+  backup = true,
+): Promise<ClaudeMessageDeleteResult> =>
+  request(`/sessions/${provider}/${encodeURIComponent(id)}/messages/delete`, {
+    method: 'POST',
+    body: JSON.stringify({ messageIds, backup }),
   });
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
@@ -85,6 +119,11 @@ export const deleteClaudeMemoryFile = (project: string, file: string): Promise<v
     { method: 'DELETE' }
   );
 
+export const rebuildClaudeMemoryIndex = (project: string): Promise<void> =>
+  request(`/memory/claude/${encodeURIComponent(project)}/index/rebuild`, {
+    method: 'POST',
+  });
+
 export const getCodexMemory = (): Promise<CodexMemoryEntry[]> =>
   request('/memory/codex');
 
@@ -92,3 +131,17 @@ export const getCodexMemory = (): Promise<CodexMemoryEntry[]> =>
 
 export const getUsage = (): Promise<ProviderUsage[]> =>
   request('/usage');
+
+// ─── Claude Artifacts ────────────────────────────────────────────────────────
+
+export const getClaudeArtifacts = (): Promise<ClaudeArtifactsOverview> =>
+  request('/claude-artifacts');
+
+export const getClaudeArtifactContent = (filePath: string): Promise<ClaudeArtifactContent> =>
+  request(`/claude-artifacts/content?path=${encodeURIComponent(filePath)}`);
+
+export const deleteClaudeArtifact = (filePath: string): Promise<ClaudeArtifactDeleteResult> =>
+  request('/claude-artifacts', {
+    method: 'DELETE',
+    body: JSON.stringify({ path: filePath }),
+  });

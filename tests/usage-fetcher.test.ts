@@ -7,6 +7,7 @@ import {
   readCodexToken,
   parseClaudeUsageResponse,
   parseCodexUsageResponse,
+  parseCodexRateLimitsResponse,
 } from '../src/server/services/usage-fetcher.js';
 
 let tmpDir: string;
@@ -143,10 +144,10 @@ describe('readCodexToken', () => {
 });
 
 describe('parseClaudeUsageResponse', () => {
-  it('parses usage tiers from Claude API response', () => {
+  it('parses usage tiers from Claude API response with percentage utilization', () => {
     const data = {
-      five_hour: { utilization: 0.42, reset_at: 1700010000 },
-      seven_day: { utilization: 0.15, reset_at: 1700700000 },
+      five_hour: { utilization: 42, resets_at: '2026-06-13T08:29:59.829Z' },
+      seven_day: { utilization: 15, resets_at: '2026-06-15T04:59:59.829Z' },
     };
 
     const tiers = parseClaudeUsageResponse(data);
@@ -155,14 +156,22 @@ describe('parseClaudeUsageResponse', () => {
     const fiveHour = tiers.find(t => t.name === 'five_hour');
     expect(fiveHour).toBeDefined();
     expect(fiveHour!.label).toBe('5 Hour');
-    expect(fiveHour!.utilization).toBe(0.42);
-    expect(fiveHour!.resetAt).toBe(1700010000);
+    expect(fiveHour!.utilization).toBeCloseTo(0.42);
+    expect(fiveHour!.resetAt).toBe(new Date('2026-06-13T08:29:59.829Z').getTime());
 
     const sevenDay = tiers.find(t => t.name === 'seven_day');
     expect(sevenDay).toBeDefined();
     expect(sevenDay!.label).toBe('7 Day');
-    expect(sevenDay!.utilization).toBe(0.15);
-    expect(sevenDay!.resetAt).toBe(1700700000);
+    expect(sevenDay!.utilization).toBeCloseTo(0.15);
+  });
+
+  it('handles utilization already as ratio (0-1)', () => {
+    const data = {
+      five_hour: { utilization: 0.42, reset_at: 1700010000 },
+    };
+    const tiers = parseClaudeUsageResponse(data);
+    expect(tiers[0].utilization).toBeCloseTo(0.42);
+    expect(tiers[0].resetAt).toBe(1700010000 * 1000);
   });
 
   it('handles empty response data', () => {
@@ -172,10 +181,10 @@ describe('parseClaudeUsageResponse', () => {
 
   it('handles all known tier names', () => {
     const data = {
-      five_hour: { utilization: 0.1, reset_at: 100 },
-      seven_day: { utilization: 0.2, reset_at: 200 },
-      seven_day_opus: { utilization: 0.3, reset_at: 300 },
-      seven_day_sonnet: { utilization: 0.4, reset_at: 400 },
+      five_hour: { utilization: 10, resets_at: '2026-06-13T08:00:00Z' },
+      seven_day: { utilization: 20, resets_at: '2026-06-15T08:00:00Z' },
+      seven_day_opus: { utilization: 30, resets_at: '2026-06-15T08:00:00Z' },
+      seven_day_sonnet: { utilization: 40, resets_at: '2026-06-15T08:00:00Z' },
     };
     const tiers = parseClaudeUsageResponse(data);
     expect(tiers.length).toBe(4);
@@ -189,8 +198,8 @@ describe('parseClaudeUsageResponse', () => {
 
   it('skips unknown tier keys', () => {
     const data = {
-      five_hour: { utilization: 0.5, reset_at: 100 },
-      unknown_tier: { utilization: 0.9, reset_at: 200 },
+      five_hour: { utilization: 50, resets_at: '2026-06-13T08:00:00Z' },
+      unknown_tier: { utilization: 90, resets_at: '2026-06-13T08:00:00Z' },
     };
     const tiers = parseClaudeUsageResponse(data);
     expect(tiers.length).toBe(1);
@@ -214,7 +223,7 @@ describe('parseCodexUsageResponse', () => {
     expect(fiveHour).toBeDefined();
     expect(fiveHour!.label).toBe('5 Hour');
     expect(fiveHour!.utilization).toBe(0.6);
-    expect(fiveHour!.resetAt).toBe(1700010000);
+    expect(fiveHour!.resetAt).toBe(1700010000 * 1000);
 
     const sevenDay = tiers.find(t => t.name === 'seven_day');
     expect(sevenDay).toBeDefined();
@@ -242,5 +251,60 @@ describe('parseCodexUsageResponse', () => {
     const tiers = parseCodexUsageResponse(data);
     expect(tiers.length).toBe(1);
     expect(tiers[0].name).toBe('five_hour');
+  });
+});
+
+describe('parseCodexRateLimitsResponse', () => {
+  it('parses Codex app-server primary and secondary windows', () => {
+    const usage = parseCodexRateLimitsResponse({
+      rateLimits: {
+        limitId: 'codex',
+        limitName: null,
+        planType: 'plus',
+        primary: { usedPercent: 6, windowDurationMins: 300, resetsAt: 1781640414 },
+        secondary: { usedPercent: 1, windowDurationMins: 10080, resetsAt: 1782227214 },
+        credits: { hasCredits: false, unlimited: false, balance: '0' },
+        individualLimit: null,
+        rateLimitReachedType: null,
+      },
+      rateLimitsByLimitId: null,
+    });
+
+    expect(usage.provider).toBe('codex');
+    expect(usage.source).toBe('codex-app-server');
+    expect(usage.extra?.planType).toBe('plus');
+    expect(usage.tiers).toHaveLength(2);
+    expect(usage.tiers[0]).toMatchObject({
+      name: 'five_hour',
+      label: '5 Hour',
+      utilization: 0.06,
+      resetAt: 1781640414 * 1000,
+      windowMinutes: 300,
+    });
+    expect(usage.tiers[1]).toMatchObject({
+      name: 'seven_day',
+      label: '7 Day',
+      utilization: 0.01,
+      resetAt: 1782227214 * 1000,
+      windowMinutes: 10080,
+    });
+  });
+
+  it('prefers the codex multi-bucket snapshot when present', () => {
+    const usage = parseCodexRateLimitsResponse({
+      rateLimits: {
+        limitId: 'other',
+        primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: 100 },
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          primary: { usedPercent: 10, windowDurationMins: 300, resetsAt: 200 },
+        },
+      },
+    });
+
+    expect(usage.tiers[0].utilization).toBe(0.1);
+    expect(usage.tiers[0].resetAt).toBe(200 * 1000);
   });
 });
