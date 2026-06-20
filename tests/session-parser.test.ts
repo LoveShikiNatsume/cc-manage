@@ -29,6 +29,17 @@ describe('extractClaudeSessionMeta', () => {
     expect(meta.id).toBe('abc-123');
     expect(meta.title).toBe('Hello world');
     expect(meta.cwd).toBe('/home/user/proj');
+    expect(meta.project).toBe('proj');
+  });
+
+  it('derives the project basename from a Windows cwd', () => {
+    const headLines = [
+      '{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-01T02:40:05.900Z","sessionId":"abc-123"}',
+      '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]},"cwd":"C:\\\\Code\\\\631","timestamp":"2026-06-01T02:40:06.000Z","sessionId":"abc-123"}',
+    ];
+    const meta = extractClaudeSessionMeta(headLines, [], 'C:\\path\\to\\file.jsonl');
+    expect(meta.cwd).toBe('C:\\Code\\631');
+    expect(meta.project).toBe('631');
   });
 
   it('prefers custom-title over first user message', () => {

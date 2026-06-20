@@ -362,11 +362,25 @@ interface CodexAppServerResponse {
 
 async function callCodexAppServer(method: string): Promise<unknown> {
   const binary = process.env.CODEX_CLI || 'codex';
+  // `codex app-server` speaks JSON-RPC over stdio by default. Older builds took
+  // a `--stdio` flag that current Codex (>= 0.135) rejects outright, so we pass
+  // no transport flag and rely on the stdio:// default, which works on both.
+  const args = ['app-server'];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, ['app-server', '--stdio'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // On Windows the `codex` CLI is a `.cmd` shim, which Node cannot spawn
+    // directly (it only launches bare executables); a shell is required so
+    // PATHEXT resolves the `.cmd`. To avoid Node's DEP0190 arg-escaping warning
+    // we pass the full command as one pre-quoted string with an empty args
+    // array — every token here is static and free of shell metacharacters.
+    // POSIX hosts run the binary directly, which also handles paths with spaces.
+    const child =
+      process.platform === 'win32'
+        ? spawn(`"${binary}" ${args.join(' ')}`, [], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            shell: true,
+          })
+        : spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';

@@ -1,5 +1,11 @@
 import fs from 'fs/promises';
 import type { SessionMeta, SessionMessage } from '@shared/types.js';
+import { projectNameFromCwd } from './project-path.js';
+
+/** Basename of a file path, tolerant of both `/` and `\` separators. */
+function fileBaseName(filePath: string): string {
+  return filePath.split(/[\\/]+/).pop() ?? '';
+}
 
 const HEAD_LINES = 20;
 const TAIL_LINES = 30;
@@ -139,10 +145,10 @@ export function extractClaudeSessionMeta(
     if (ts && ts > lastActivity) lastActivity = ts;
   }
 
-  const project = cwd ? cwd.split('/').pop() || cwd : 'unknown';
+  const project = projectNameFromCwd(cwd) || 'unknown';
 
   return {
-    id: id || filePath.split('/').pop()?.replace('.jsonl', '') || 'unknown',
+    id: id || fileBaseName(filePath).replace('.jsonl', '') || 'unknown',
     provider: 'claude',
     title: title || 'Untitled',
     project,
@@ -258,10 +264,10 @@ export function extractCodexSessionMeta(
     if (ts && ts > lastActivity) lastActivity = ts;
   }
 
-  const project = cwd ? cwd.split('/').pop() || cwd : 'unknown';
+  const project = projectNameFromCwd(cwd) || 'unknown';
 
   return {
-    id: id || filePath.split('/').pop()?.replace('.jsonl', '') || 'unknown',
+    id: id || fileBaseName(filePath).replace('.jsonl', '') || 'unknown',
     provider: 'codex',
     title: title || 'Untitled',
     project,

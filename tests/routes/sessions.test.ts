@@ -94,6 +94,70 @@ describe('GET /api/sessions', () => {
     await app.close();
   });
 
+  it('folds case-only path differences into a single Windows project', async () => {
+    // Two Claude sessions whose recorded cwd differs only by case must group
+    // together — Windows paths are case-insensitive on disk.
+    const projectsDir = path.join(claudeConfigDir, 'projects');
+    const variants: Array<[string, string, string]> = [
+      ['C--Code-631', 'session-win-001', 'C:\\Code\\631'],
+      ['c--code-631', 'session-win-002', 'c:\\code\\631'],
+    ];
+    for (const [dirName, id, cwd] of variants) {
+      const dir = path.join(projectsDir, dirName);
+      await fs.mkdir(dir, { recursive: true });
+      const jsonl =
+        [
+          `{"type":"queue-operation","operation":"enqueue","timestamp":"2026-06-03T10:00:00.000Z","sessionId":"${id}"}`,
+          `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"win ${id}"}]},"cwd":${JSON.stringify(cwd)},"timestamp":"2026-06-03T10:00:01.000Z","sessionId":"${id}"}`,
+        ].join('\n') + '\n';
+      await fs.writeFile(path.join(dir, `${id}.jsonl`), jsonl, 'utf-8');
+    }
+
+    const app = createApp();
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/sessions' });
+    const body = res.json();
+    const claudeGroup = body.find((g: any) => g.provider === 'claude');
+
+    const winProjects = claudeGroup.projects.filter((p: any) => p.name === '631');
+    expect(winProjects).toHaveLength(1);
+    const ids = winProjects[0].sessions.map((s: any) => s.id).sort();
+    expect(ids).toEqual(['session-win-001', 'session-win-002']);
+
+    await app.close();
+  });
+
+  it('buckets project-less Codex Desktop scratch chats under "(no project)"', async () => {
+    const sessionsDir = path.join(codexConfigDir, 'sessions');
+    const scratch: Array<[string, string]> = [
+      ['scratch-001', 'C:\\Users\\Type\\Documents\\Codex\\2026-05-05\\slug-a'],
+      ['scratch-002', 'C:\\Users\\Type\\Documents\\Codex\\2026-05-07\\slug-b'],
+    ];
+    for (const [id, cwd] of scratch) {
+      const jsonl =
+        [
+          `{"timestamp":"2026-06-05T05:00:00.000Z","type":"session_meta","payload":{"id":"${id}","cwd":${JSON.stringify(cwd)},"source":"vscode"}}`,
+          `{"timestamp":"2026-06-05T05:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"scratch ${id}"}]}}`,
+        ].join('\n') + '\n';
+      await fs.writeFile(path.join(sessionsDir, `${id}.jsonl`), jsonl, 'utf-8');
+    }
+
+    const app = createApp();
+    await app.ready();
+    const res = await app.inject({ method: 'GET', url: '/api/sessions' });
+    const body = res.json();
+    const codexGroup = body.find((g: any) => g.provider === 'codex');
+
+    const noProject = codexGroup.projects.filter((p: any) => p.name === '(no project)');
+    expect(noProject).toHaveLength(1);
+    const ids = noProject[0].sessions.map((s: any) => s.id).sort();
+    expect(ids).toEqual(['scratch-001', 'scratch-002']);
+    // The real-project session from beforeEach must stay in its own group.
+    expect(codexGroup.projects.some((p: any) => p.name === 'codexproject')).toBe(true);
+
+    await app.close();
+  });
+
   it('returns empty array when no sessions exist', async () => {
     const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'empty-config-'));
     try {

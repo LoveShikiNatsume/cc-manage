@@ -197,7 +197,11 @@ describe('resolveClaudeToken', () => {
     expect(persisted.claudeAiOauth.refreshToken).toBe('new-refresh');
     expect(persisted.claudeAiOauth.subscriptionType).toBe('pro');
     expect(persisted.claudeAiOauth.expiresAt).toBeGreaterThan(Date.now());
-    expect((await fs.stat(path.join(claudeDir, '.credentials.json'))).mode & 0o777).toBe(0o600);
+    // Unix permission bits are not meaningful on Windows (NTFS uses ACLs and
+    // Node reports a synthetic 0o666 mode), so only assert them on POSIX hosts.
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(path.join(claudeDir, '.credentials.json'))).mode & 0o777).toBe(0o600);
+    }
   });
 
   it('only marks an explicitly rejected refresh token as invalid auth', async () => {

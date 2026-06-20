@@ -21,6 +21,13 @@ import {
 import { recordCliSessionDeleted } from '../services/claude-desktop-sync/state.js';
 import { withClaudeJsonlWriteLock } from '../services/claude-jsonl-lock.js';
 import { listClaudeSessionArtifacts } from '../services/claude-artifacts.js';
+import {
+  projectGroupKey,
+  projectNameFromCwd,
+  isCodexScratchCwd,
+  CODEX_NO_PROJECT_KEY,
+  CODEX_NO_PROJECT_NAME,
+} from '../services/project-path.js';
 
 interface SessionsPluginOptions {
   claudeConfigDir?: string;
@@ -58,24 +65,42 @@ async function refreshSessionMap(
   return allSessions;
 }
 
+// Resolve the grouping bucket for a session. Project-less Codex chats (run
+// without a project, or via Codex Desktop's throwaway scratch workspaces) are
+// folded into a single "(no project)" bucket instead of one group per cwd.
+function resolveProjectBucket(s: SessionMeta): { key: string; name: string; cwd: string } {
+  if (s.provider === 'codex' && (!s.cwd || isCodexScratchCwd(s.cwd))) {
+    return { key: CODEX_NO_PROJECT_KEY, name: CODEX_NO_PROJECT_NAME, cwd: '' };
+  }
+  return {
+    key: projectGroupKey(s.cwd) || s.project || 'unknown',
+    name: projectNameFromCwd(s.cwd) || s.project || 'unknown',
+    cwd: s.cwd,
+  };
+}
+
 function groupSessions(sessions: SessionMeta[]): ProviderGroup[] {
-  const providerMap = new Map<Provider, Map<string, { cwd: string; sessions: SessionMeta[] }>>();
+  const providerMap = new Map<
+    Provider,
+    Map<string, { name: string; cwd: string; sessions: SessionMeta[] }>
+  >();
 
   for (const s of sessions) {
     if (!providerMap.has(s.provider)) {
       providerMap.set(s.provider, new Map());
     }
     const projectMap = providerMap.get(s.provider)!;
-    if (!projectMap.has(s.project)) {
-      projectMap.set(s.project, { cwd: s.cwd, sessions: [] });
+    const { key, name, cwd } = resolveProjectBucket(s);
+    if (!projectMap.has(key)) {
+      projectMap.set(key, { name, cwd, sessions: [] });
     }
-    projectMap.get(s.project)!.sessions.push(s);
+    projectMap.get(key)!.sessions.push(s);
   }
 
   const result: ProviderGroup[] = [];
   for (const [provider, projectMap] of providerMap) {
     const projects: ProjectGroup[] = [];
-    for (const [name, { cwd, sessions }] of projectMap) {
+    for (const { name, cwd, sessions } of projectMap.values()) {
       projects.push({ name, cwd, sessions });
     }
     result.push({ provider, projects });
