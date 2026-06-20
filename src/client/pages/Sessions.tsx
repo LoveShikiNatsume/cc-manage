@@ -11,12 +11,15 @@ import {
   RefreshCw,
   AlertTriangle,
   Archive,
+  PanelRightOpen,
 } from 'lucide-react';
 import type { ClaudeRepairIssue, ProviderGroup, SessionMeta, SessionMessage } from '@shared/types';
 import MarkdownView from '../components/MarkdownView';
+import SessionArtifactsPanel from '../components/SessionArtifactsPanel';
 import {
   getSessions,
   getMessages,
+  getSessionArtifacts,
   deleteSession,
   batchDeleteSessions,
   renameSession,
@@ -66,6 +69,8 @@ export default function Sessions() {
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [createBackups, setCreateBackups] = useState(true);
+  const [resourcesOpen, setResourcesOpen] = useState(false);
+  const [resourceCount, setResourceCount] = useState<number | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
 
@@ -106,16 +111,26 @@ export default function Sessions() {
     setMessages([]);
     setSelectedMessages(new Set());
     setMessageSelectMode(false);
+    setResourceCount(null);
     if (!opts.preserveNotice) setMutationNotice(null);
     setLoadingMsgs(true);
-    try {
-      const msgs = await getMessages(session.provider, session.id);
-      setMessages(msgs);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoadingMsgs(false);
+    const [messageResult, artifactResult] = await Promise.allSettled([
+      getMessages(session.provider, session.id),
+      session.provider === 'claude'
+        ? getSessionArtifacts(session.provider, session.id)
+        : Promise.resolve(null),
+    ]);
+    if (messageResult.status === 'fulfilled') {
+      setMessages(messageResult.value);
+    } else {
+      console.error(messageResult.reason);
     }
+    if (artifactResult.status === 'fulfilled' && artifactResult.value) {
+      setResourceCount(artifactResult.value.totalCount);
+    } else if (artifactResult.status === 'rejected') {
+      console.error(artifactResult.reason);
+    }
+    setLoadingMsgs(false);
   };
 
   const toggleCollapse = (key: string) => {
@@ -205,6 +220,10 @@ export default function Sessions() {
     setRepairBusy(true);
     try {
       const result = await repairSession(selectedSession.provider, selectedSession.id, createBackups);
+      if (!result.ok) {
+        setMutationNotice(result.error ?? 'Automatic repair was refused.');
+        return;
+      }
       const notice = `Repair complete. Backup: ${
         result.backupPath ?? (createBackups ? 'none' : 'disabled')
       }; inserted ${result.inserted}, dropped orphan results ${result.droppedOrphans}.`;
@@ -220,10 +239,11 @@ export default function Sessions() {
   };
 
   const handleRepairAll = async () => {
-    if (repairIssues.length === 0) return;
+    const repairableCount = repairIssues.filter(issue => issue.repairable).length;
+    if (repairableCount === 0) return;
     if (
       !confirm(
-        `Repair ${repairIssues.length} Claude session(s)? ${
+        `Repair ${repairableCount} automatically repairable Claude session(s)? ${
           createBackups ? 'Backups will be created.' : 'Backups are disabled.'
         }`,
       )
@@ -316,6 +336,7 @@ export default function Sessions() {
   const selectedRepairIssue = selectedSession
     ? repairIssueById.get(selectedSession.id)
     : undefined;
+  const repairableIssueCount = repairIssues.filter(issue => issue.repairable).length;
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -375,14 +396,14 @@ export default function Sessions() {
               <Archive size={13} />
               {createBackups ? 'Backup' : 'No backup'}
             </button>
-            {repairIssues.length > 0 && (
+            {repairableIssueCount > 0 && (
               <button
                 onClick={handleRepairAll}
                 disabled={repairBusy}
                 className="flex items-center gap-1.5 text-xs px-2 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white transition-colors disabled:opacity-60"
               >
                 <Wrench size={13} />
-                Repair ({repairIssues.length})
+                Repair ({repairableIssueCount})
               </button>
             )}
           </div>
@@ -503,15 +524,29 @@ export default function Sessions() {
                 {selectedRepairIssue && (
                   <button
                     onClick={handleRepairSelected}
-                    disabled={repairBusy}
+                    disabled={repairBusy || !selectedRepairIssue.repairable}
+                    title={selectedRepairIssue.repairBlockedReason}
                     className="shrink-0 flex items-center gap-1.5 rounded bg-amber-500 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-amber-600 disabled:opacity-60"
                   >
                     <Wrench size={13} />
-                    Repair hidden ({selectedRepairIssue.hidden})
+                    {selectedRepairIssue.repairable
+                      ? `Repair hidden (${selectedRepairIssue.hidden})`
+                      : 'Manual review required'}
                   </button>
                 )}
                 {selectedSession.provider === 'claude' && (
                   <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      onClick={() => setResourcesOpen(open => !open)}
+                      className={`flex items-center gap-1.5 rounded px-2.5 py-1.5 text-xs font-medium ${
+                        resourcesOpen
+                          ? 'bg-blue-50 text-blue-700'
+                          : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
+                      }`}
+                    >
+                      <PanelRightOpen size={13} />
+                      Resources{resourceCount !== null ? ` (${resourceCount})` : ''}
+                    </button>
                     <button
                       onClick={() => {
                         setMessageSelectMode(mode => !mode);
@@ -544,6 +579,12 @@ export default function Sessions() {
                   <AlertTriangle size={13} />
                   <span>
                     {selectedRepairIssue.hidden} hidden assistant message(s), {selectedRepairIssue.roots} root tree(s)
+                    {selectedRepairIssue.compactions > 0
+                      ? `, ${selectedRepairIssue.compactions} compact boundary/boundaries`
+                      : ''}
+                    {selectedRepairIssue.repairBlockedReason
+                      ? `. ${selectedRepairIssue.repairBlockedReason}`
+                      : ''}
                   </span>
                 </div>
               )}
@@ -553,6 +594,7 @@ export default function Sessions() {
                 </div>
               )}
             </div>
+            <div className="flex min-h-0 flex-1 overflow-hidden">
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
               {loadingMsgs && (
                 <p className="text-gray-400 text-sm text-center py-8">Loading…</p>
@@ -607,6 +649,13 @@ export default function Sessions() {
               );
               })}
               <div ref={msgEndRef} />
+            </div>
+            {resourcesOpen && selectedSession.provider === 'claude' && (
+              <SessionArtifactsPanel
+                session={selectedSession}
+                onClose={() => setResourcesOpen(false)}
+              />
+            )}
             </div>
           </>
         ) : (

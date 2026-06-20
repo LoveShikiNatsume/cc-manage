@@ -22,6 +22,20 @@ const BRANCHED_JSONL = [
   '{"type":"last-prompt","leafUuid":"a2"}',
 ].join('\n') + '\n';
 
+const COMPACTED_JSONL = [
+  '{"uuid":"u1","parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Start"}]},"cwd":"/home/user/repairproj","timestamp":"2026-06-01T02:40:06.000Z","sessionId":"repair-session-001"}',
+  '{"uuid":"a1","parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Before compact"}]},"timestamp":"2026-06-01T02:41:00.000Z","sessionId":"repair-session-001"}',
+  '{"uuid":"c1","parentUuid":null,"logicalParentUuid":"a1","isSidechain":false,"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual"},"timestamp":"2026-06-01T02:42:00.000Z","sessionId":"repair-session-001"}',
+  '{"uuid":"u2","parentUuid":"c1","isSidechain":false,"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":[{"type":"text","text":"Summary"}]},"timestamp":"2026-06-01T02:42:01.000Z","sessionId":"repair-session-001"}',
+  '{"uuid":"a2","parentUuid":"u2","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"After compact"}]},"timestamp":"2026-06-01T02:43:00.000Z","sessionId":"repair-session-001"}',
+  '{"type":"last-prompt","leafUuid":"a2"}',
+].join('\n') + '\n';
+
+const BROKEN_COMPACT_JSONL = COMPACTED_JSONL.replace(
+  '"logicalParentUuid":"a1"',
+  '"logicalParentUuid":"missing"',
+);
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-repair-test-'));
   configDir = tmpDir;
@@ -41,6 +55,34 @@ describe('scanClaudeRepairFile', () => {
     expect(stats.hidden).toBe(1);
     expect(stats.shown).toBe(1);
   });
+
+  it('treats a detached compact boundary with a valid logical parent as healthy', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    const stats = await scanClaudeRepairFile(sessionFile);
+
+    expect(stats).toMatchObject({
+      roots: 1,
+      shown: 2,
+      hidden: 0,
+      compactions: 1,
+      invalidCompactions: 0,
+    });
+  });
+
+  it('still detects a compact boundary when both parent links are broken', async () => {
+    await fs.writeFile(sessionFile, BROKEN_COMPACT_JSONL, 'utf-8');
+
+    const stats = await scanClaudeRepairFile(sessionFile);
+
+    expect(stats).toMatchObject({
+      roots: 2,
+      shown: 1,
+      hidden: 1,
+      compactions: 1,
+      invalidCompactions: 1,
+    });
+  });
 });
 
 describe('scanClaudeRepairIssues', () => {
@@ -52,6 +94,27 @@ describe('scanClaudeRepairIssues', () => {
       project: 'repairproj',
       hidden: 1,
     });
+  });
+
+  it('does not list a healthy compacted session', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    await expect(scanClaudeRepairIssues(configDir)).resolves.toEqual([]);
+  });
+
+  it('lists a genuinely broken compacted session but blocks automatic repair', async () => {
+    await fs.writeFile(sessionFile, BROKEN_COMPACT_JSONL, 'utf-8');
+
+    const issues = await scanClaudeRepairIssues(configDir);
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      hidden: 1,
+      compactions: 1,
+      invalidCompactions: 1,
+      repairable: false,
+    });
+    expect(issues[0].repairBlockedReason).toContain('compact');
   });
 });
 
@@ -78,6 +141,27 @@ describe('repairClaudeSessionFile', () => {
 
     expect(result.ok).toBe(true);
     expect(result.backupPath).toBeUndefined();
+    await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('leaves a healthy compacted session byte-for-byte unchanged', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    const result = await repairClaudeSessionFile(sessionFile, { configDir });
+
+    expect(result).toMatchObject({ ok: true, changed: false, relinked: 0 });
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(COMPACTED_JSONL);
+    await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('refuses to flatten a genuinely broken compacted session', async () => {
+    await fs.writeFile(sessionFile, BROKEN_COMPACT_JSONL, 'utf-8');
+
+    const result = await repairClaudeSessionFile(sessionFile, { configDir });
+
+    expect(result).toMatchObject({ ok: false, changed: false, relinked: 0 });
+    expect(result.error).toContain('compact');
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(BROKEN_COMPACT_JSONL);
     await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
   });
 });
@@ -121,6 +205,35 @@ describe('deleteClaudeSessionMessages', () => {
 
     expect(result.ok).toBe(true);
     expect(result.backupPath).toBeUndefined();
+    await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('updates last-prompt when deleting the current leaf from a healthy session', async () => {
+    const linearSession = [
+      '{"uuid":"u1","parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Start"}]},"timestamp":"2026-06-01T02:40:06.000Z","sessionId":"repair-session-001"}',
+      '{"uuid":"a1","parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"First"}]},"timestamp":"2026-06-01T02:41:00.000Z","sessionId":"repair-session-001"}',
+      '{"uuid":"u2","parentUuid":"a1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Continue"}]},"timestamp":"2026-06-01T02:42:00.000Z","sessionId":"repair-session-001"}',
+      '{"uuid":"a2","parentUuid":"u2","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Last"}]},"timestamp":"2026-06-01T02:43:00.000Z","sessionId":"repair-session-001"}',
+      '{"type":"last-prompt","leafUuid":"a2"}',
+    ].join('\n') + '\n';
+    await fs.writeFile(sessionFile, linearSession, 'utf-8');
+
+    await deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir });
+
+    const rows = (await fs.readFile(sessionFile, 'utf-8'))
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(rows.find(row => row.type === 'last-prompt').leafUuid).toBe('u2');
+  });
+
+  it('refuses message deletion when it would flatten compact history', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    await expect(
+      deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir }),
+    ).rejects.toThrow(/compact/i);
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(COMPACTED_JSONL);
     await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
   });
 });

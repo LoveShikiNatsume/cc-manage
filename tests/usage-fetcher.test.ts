@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import {
   readClaudeToken,
+  resolveClaudeToken,
   readCodexToken,
   parseClaudeUsageResponse,
   parseCodexUsageResponse,
@@ -26,6 +27,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
@@ -114,7 +116,7 @@ describe('readCodexToken', () => {
     expect(token).toBeNull();
   });
 
-  it('returns null when last_refresh is too old (more than 8 days)', async () => {
+  it('does not expire a token based only on last_refresh age', async () => {
     const oldRefresh = new Date(Date.now() - 1000 * 60 * 60 * 24 * 9).toISOString(); // 9 days ago
     const auth = {
       auth_mode: 'chatgpt',
@@ -128,7 +130,7 @@ describe('readCodexToken', () => {
     );
 
     const token = await readCodexToken(codexDir);
-    expect(token).toBeNull();
+    expect(token).toBe('eyJ-old-token');
   });
 
   it('returns null when auth file does not exist', async () => {
@@ -140,6 +142,109 @@ describe('readCodexToken', () => {
     await fs.writeFile(path.join(codexDir, 'auth.json'), 'bad json', 'utf-8');
     const token = await readCodexToken(codexDir);
     expect(token).toBeNull();
+  });
+});
+
+describe('resolveClaudeToken', () => {
+  it('refreshes an expired access token and atomically persists rotated credentials', async () => {
+    await fs.writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'expired-access',
+          refreshToken: 'old-refresh',
+          expiresAt: PAST_EXPIRES_AT,
+          scopes: ['user:profile', 'user:inference'],
+          subscriptionType: 'pro',
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: 'new-access',
+          refresh_token: 'new-refresh',
+          expires_in: 3600,
+          scope: 'user:profile user:inference',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    const result = await resolveClaudeToken(claudeDir);
+
+    expect(result).toEqual({ token: 'new-access', authInvalid: false });
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://platform.claude.com/v1/oauth/token',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const request = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(request).toMatchObject({
+      grant_type: 'refresh_token',
+      refresh_token: 'old-refresh',
+      client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+      scope: 'user:profile user:inference',
+    });
+
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(claudeDir, '.credentials.json'), 'utf-8'),
+    );
+    expect(persisted.claudeAiOauth.accessToken).toBe('new-access');
+    expect(persisted.claudeAiOauth.refreshToken).toBe('new-refresh');
+    expect(persisted.claudeAiOauth.subscriptionType).toBe('pro');
+    expect(persisted.claudeAiOauth.expiresAt).toBeGreaterThan(Date.now());
+    expect((await fs.stat(path.join(claudeDir, '.credentials.json'))).mode & 0o777).toBe(0o600);
+  });
+
+  it('only marks an explicitly rejected refresh token as invalid auth', async () => {
+    await fs.writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'expired-access',
+          refreshToken: 'invalid-refresh',
+          expiresAt: PAST_EXPIRES_AT,
+        },
+      }),
+      'utf-8',
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: 'invalid_grant', error_description: 'Refresh token expired' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+
+    await expect(resolveClaudeToken(claudeDir)).resolves.toEqual({
+      token: null,
+      authInvalid: true,
+      error: 'Refresh token expired',
+    });
+  });
+
+  it('treats refresh network failures as transient instead of requiring login', async () => {
+    await fs.writeFile(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: 'expired-access',
+          refreshToken: 'valid-refresh',
+          expiresAt: PAST_EXPIRES_AT,
+        },
+      }),
+      'utf-8',
+    );
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('network unavailable'));
+
+    await expect(resolveClaudeToken(claudeDir)).resolves.toEqual({
+      token: null,
+      authInvalid: false,
+      error: 'network unavailable',
+    });
   });
 });
 

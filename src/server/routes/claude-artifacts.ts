@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import {
+  deleteAllClaudeArtifactBackups,
   deleteClaudeArtifact,
   listClaudeArtifacts,
   readClaudeArtifactContent,
@@ -18,6 +19,17 @@ export const claudeArtifactsRoutes: FastifyPluginAsync<ClaudeArtifactsPluginOpti
   app.get('/api/claude-artifacts', async (_req, reply) => {
     const overview = await listClaudeArtifacts(claudeConfigDir);
     return reply.send(overview);
+  });
+
+  app.delete('/api/claude-artifacts/backups', async (_req, reply) => {
+    try {
+      const result = await deleteAllClaudeArtifactBackups({ configDir: claudeConfigDir });
+      return reply.send(result);
+    } catch (err) {
+      return reply
+        .status(500)
+        .send({ error: err instanceof Error ? err.message : 'Bulk backup deletion failed' });
+    }
   });
 
   app.get<{

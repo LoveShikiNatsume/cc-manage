@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
-import type { ProviderUsage, UsageTier } from '@shared/types.js';
+import type { Provider, ProviderUsage, UsageTier } from '@shared/types.js';
 
 export function getClaudeConfigDir(): string {
   return path.join(os.homedir(), '.claude');
@@ -13,12 +13,19 @@ export function getCodexConfigDir(): string {
 }
 
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const CLAUDE_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const CLAUDE_DEFAULT_SCOPES = [
+  'user:profile',
+  'user:inference',
+  'user:sessions:claude_code',
+  'user:mcp_servers',
+  'user:file_upload',
+];
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const CODEX_APP_SERVER_TIMEOUT_MS = 12_000;
 const CODEX_USAGE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
-
-// 8 days in milliseconds
-const CODEX_MAX_TOKEN_AGE_MS = 8 * 24 * 60 * 60 * 1000;
+const CLAUDE_USAGE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 // 10-second cache
 const CACHE_TTL_MS = 10_000;
@@ -86,6 +93,194 @@ export async function readClaudeToken(claudeDir?: string): Promise<string | null
   }
 }
 
+interface ClaudeOauthCredentials {
+  accessToken?: unknown;
+  refreshToken?: unknown;
+  expiresAt?: unknown;
+  scopes?: unknown;
+  [key: string]: unknown;
+}
+
+interface ClaudeCredentialsFile {
+  claudeAiOauth?: ClaudeOauthCredentials;
+  [key: string]: unknown;
+}
+
+export interface ClaudeTokenResolution {
+  token: string | null;
+  authInvalid: boolean;
+  error?: string;
+}
+
+const claudeRefreshInflight = new Map<string, Promise<ClaudeTokenResolution>>();
+
+async function readClaudeCredentials(
+  claudeDir?: string,
+): Promise<{ credPath: string; data: ClaudeCredentialsFile; oauth: ClaudeOauthCredentials } | null> {
+  const baseDir = claudeDir ?? getClaudeConfigDir();
+  const credPath = path.join(baseDir, '.credentials.json');
+  try {
+    const data = JSON.parse(await fs.readFile(credPath, 'utf-8')) as ClaudeCredentialsFile;
+    if (!data?.claudeAiOauth || typeof data.claudeAiOauth !== 'object') return null;
+    return { credPath, data, oauth: data.claudeAiOauth };
+  } catch {
+    return null;
+  }
+}
+
+async function writeClaudeCredentialsAtomically(
+  credPath: string,
+  data: ClaudeCredentialsFile,
+): Promise<void> {
+  const tempPath = `${credPath}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.rename(tempPath, credPath);
+    await fs.chmod(credPath, 0o600);
+  } catch (err) {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+function claudeRefreshError(
+  status: number,
+  body: Record<string, unknown> | null,
+): ClaudeTokenResolution {
+  const code = typeof body?.error === 'string' ? body.error : null;
+  const description =
+    typeof body?.error_description === 'string' ? body.error_description : null;
+  const authInvalid = code === 'invalid_grant' || code === 'invalid_token';
+  return {
+    token: null,
+    authInvalid,
+    error: description || code || `Claude OAuth refresh failed (HTTP ${status})`,
+  };
+}
+
+async function refreshClaudeToken(
+  credentials: { credPath: string; data: ClaudeCredentialsFile; oauth: ClaudeOauthCredentials },
+): Promise<ClaudeTokenResolution> {
+  const refreshToken = credentials.oauth.refreshToken;
+  if (typeof refreshToken !== 'string' || !refreshToken) {
+    return {
+      token: null,
+      authInvalid: true,
+      error: 'Claude access token expired and no refresh token is available',
+    };
+  }
+
+  try {
+    const body: Record<string, unknown> = {
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: CLAUDE_OAUTH_CLIENT_ID,
+    };
+    const scopes = Array.isArray(credentials.oauth.scopes)
+      ? credentials.oauth.scopes.filter(
+        (scope): scope is string => typeof scope === 'string',
+      )
+      : [];
+    body.scope = (scopes.length > 0 ? scopes : CLAUDE_DEFAULT_SCOPES).join(' ');
+
+    const res = await fetch(CLAUDE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    let response: Record<string, unknown> | null = null;
+    try {
+      response = (await res.json()) as Record<string, unknown>;
+    } catch {
+      // The HTTP status still gives us a useful transient error below.
+    }
+
+    if (!res.ok) return claudeRefreshError(res.status, response);
+
+    const accessToken = response?.access_token;
+    const expiresIn = response?.expires_in;
+    if (
+      typeof accessToken !== 'string' ||
+      typeof expiresIn !== 'number' ||
+      !Number.isFinite(expiresIn) ||
+      expiresIn <= 0
+    ) {
+      return {
+        token: null,
+        authInvalid: false,
+        error: 'Claude OAuth refresh returned an invalid response',
+      };
+    }
+
+    // Claude itself may have refreshed the same rotating token while our request
+    // was in flight. Prefer that newer credential rather than overwriting it.
+    const current = await readClaudeCredentials(path.dirname(credentials.credPath));
+    if (
+      current &&
+      typeof current.oauth.accessToken === 'string' &&
+      (current.oauth.refreshToken !== refreshToken ||
+        current.oauth.accessToken !== credentials.oauth.accessToken) &&
+      (typeof current.oauth.expiresAt !== 'number' || current.oauth.expiresAt > Date.now())
+    ) {
+      return { token: current.oauth.accessToken, authInvalid: false };
+    }
+
+    const latestData = current?.data ?? credentials.data;
+    const latestOauth = current?.oauth ?? credentials.oauth;
+    const scope = response?.scope;
+    const refreshedOauth: ClaudeOauthCredentials = {
+      ...latestOauth,
+      accessToken,
+      refreshToken:
+        typeof response?.refresh_token === 'string' ? response.refresh_token : refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+    };
+    if (typeof scope === 'string') refreshedOauth.scopes = scope.split(' ').filter(Boolean);
+
+    await writeClaudeCredentialsAtomically(credentials.credPath, {
+      ...latestData,
+      claudeAiOauth: refreshedOauth,
+    });
+    return { token: accessToken, authInvalid: false };
+  } catch (err) {
+    return {
+      token: null,
+      authInvalid: false,
+      error: err instanceof Error ? err.message : 'Claude OAuth refresh failed',
+    };
+  }
+}
+
+export async function resolveClaudeToken(
+  claudeDir?: string,
+  forceRefresh = false,
+): Promise<ClaudeTokenResolution> {
+  const credentials = await readClaudeCredentials(claudeDir);
+  if (!credentials) {
+    return { token: null, authInvalid: true, error: 'Claude credentials are unavailable' };
+  }
+
+  const { accessToken, expiresAt } = credentials.oauth;
+  const isUsable =
+    typeof accessToken === 'string' &&
+    (typeof expiresAt !== 'number' || expiresAt > Date.now() + 60_000);
+  if (!forceRefresh && isUsable) {
+    return { token: accessToken, authInvalid: false };
+  }
+
+  const key = credentials.credPath;
+  const running = claudeRefreshInflight.get(key);
+  if (running) return running;
+
+  const request = refreshClaudeToken(credentials).finally(() => {
+    claudeRefreshInflight.delete(key);
+  });
+  claudeRefreshInflight.set(key, request);
+  return request;
+}
+
 export async function readCodexToken(codexDir?: string): Promise<string | null> {
   const baseDir = codexDir ?? getCodexConfigDir();
   const authPath = path.join(baseDir, 'auth.json');
@@ -95,14 +290,6 @@ export async function readCodexToken(codexDir?: string): Promise<string | null> 
     const data = JSON.parse(raw);
 
     if (data?.auth_mode !== 'chatgpt') return null;
-
-    // Check last_refresh age
-    if (typeof data.last_refresh === 'string') {
-      const refreshTime = new Date(data.last_refresh).getTime();
-      if (isNaN(refreshTime) || Date.now() - refreshTime > CODEX_MAX_TOKEN_AGE_MS) {
-        return null;
-      }
-    }
 
     const token = data?.tokens?.access_token;
     if (typeof token !== 'string') return null;
@@ -328,6 +515,55 @@ async function readCachedCodexUsage(error: string): Promise<ProviderUsage | null
   }
 }
 
+function claudeUsageCachePath(): string {
+  return path.join(getClaudeConfigDir(), 'cache', 'cc-manage-usage.json');
+}
+
+async function writeCachedClaudeUsage(usage: ProviderUsage): Promise<void> {
+  try {
+    const cachePath = claudeUsageCachePath();
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    await fs.writeFile(
+      cachePath,
+      JSON.stringify({ fetchedAt: Date.now(), usage }, null, 2),
+      'utf-8',
+    );
+  } catch {
+    // Cache is best-effort only.
+  }
+}
+
+async function readCachedClaudeUsage(
+  error: string,
+  tokenExpired = false,
+): Promise<ProviderUsage | null> {
+  try {
+    const raw = await fs.readFile(claudeUsageCachePath(), 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.fetchedAt !== 'number' ||
+      Date.now() - parsed.fetchedAt > CLAUDE_USAGE_CACHE_MAX_AGE_MS ||
+      typeof parsed?.usage !== 'object' ||
+      parsed.usage === null
+    ) {
+      return null;
+    }
+
+    return {
+      ...(parsed.usage as ProviderUsage),
+      source: 'claude-cache',
+      tokenExpired: tokenExpired || undefined,
+      extra: {
+        ...((parsed.usage as ProviderUsage).extra ?? {}),
+        cachedAt: parsed.fetchedAt,
+        refreshError: error,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseRateLimitWindow(
   snapshot: Record<string, unknown>,
   key: 'primary' | 'secondary',
@@ -425,41 +661,83 @@ export function parseCodexRateLimitsResponse(data: Record<string, unknown>): Pro
 // --- Fetch functions ---
 
 async function fetchClaudeUsage(): Promise<ProviderUsage> {
-  const token = await readClaudeToken();
-  if (!token) {
-    return { provider: 'claude', tiers: [], tokenExpired: true };
-  }
-
-  try {
-    const res = await fetch(CLAUDE_USAGE_URL, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-
-    if (!res.ok) {
-      if (res.status === 401) {
-        return { provider: 'claude', tiers: [], tokenExpired: true };
-      }
-      return { provider: 'claude', tiers: [], error: `HTTP ${res.status}` };
-    }
-
-    const data = await res.json();
-    return { provider: 'claude', tiers: parseClaudeUsageResponse(data) };
-  } catch (err) {
+  const resolved = await resolveClaudeToken();
+  if (!resolved.token) {
+    const error = resolved.error || 'Claude OAuth token unavailable';
+    const cached = await readCachedClaudeUsage(error, resolved.authInvalid);
+    if (cached) return cached;
     return {
       provider: 'claude',
       tiers: [],
-      error: err instanceof Error ? err.message : 'Unknown error',
+      tokenExpired: resolved.authInvalid || undefined,
+      error: resolved.authInvalid ? undefined : error,
+    };
+  }
+
+  try {
+    const requestUsage = (token: string) =>
+      fetch(CLAUDE_USAGE_URL, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+    let res = await requestUsage(resolved.token);
+
+    // The access token can be revoked before its local expiry. Refresh once and
+    // retry before concluding that the user needs to authenticate again.
+    if (res.status === 401) {
+      const refreshed = await resolveClaudeToken(undefined, true);
+      if (refreshed.token) {
+        res = await requestUsage(refreshed.token);
+      } else {
+        const error = refreshed.error || 'Claude OAuth token rejected';
+        const cached = await readCachedClaudeUsage(error, refreshed.authInvalid);
+        if (cached) return cached;
+        return {
+          provider: 'claude',
+          tiers: [],
+          tokenExpired: refreshed.authInvalid || undefined,
+          error: refreshed.authInvalid ? undefined : error,
+        };
+      }
+    }
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        const cached = await readCachedClaudeUsage('Claude OAuth token rejected after refresh');
+        if (cached) return cached;
+        return {
+          provider: 'claude',
+          tiers: [],
+          error: 'Claude OAuth token was rejected after refresh',
+        };
+      }
+      const error = `HTTP ${res.status}`;
+      const cached = await readCachedClaudeUsage(error);
+      if (cached) return cached;
+      return { provider: 'claude', tiers: [], error };
+    }
+
+    const data = await res.json();
+    const usage: ProviderUsage = {
+      provider: 'claude',
+      tiers: parseClaudeUsageResponse(data),
+      source: 'anthropic-oauth',
+    };
+    if (usage.tiers.length > 0) await writeCachedClaudeUsage(usage);
+    return usage;
+  } catch (err) {
+    const error = err instanceof Error ? err.message : 'Unknown error';
+    const cached = await readCachedClaudeUsage(error);
+    if (cached) return cached;
+    return {
+      provider: 'claude',
+      tiers: [],
+      error,
     };
   }
 }
 
 async function fetchCodexUsage(): Promise<ProviderUsage> {
-  const token = await readCodexToken();
-  if (!token) {
-    return { provider: 'codex', tiers: [], tokenExpired: true };
-  }
-
   let appServerError: string | null = null;
   try {
     const rateLimits = await callCodexAppServerWithRetries('account/rateLimits/read');
@@ -475,6 +753,18 @@ async function fetchCodexUsage(): Promise<ProviderUsage> {
     appServerError = err instanceof Error ? err.message : 'Codex app-server failed';
   }
 
+  // The app-server owns token refresh. Only require a readable access token for
+  // the HTTP fallback after the local source has actually failed.
+  const token = await readCodexToken();
+  if (!token) {
+    const error = appServerError
+      ? `Codex app-server: ${appServerError}; HTTP fallback token unavailable`
+      : 'Codex access token unavailable';
+    const cached = await readCachedCodexUsage(error);
+    if (cached) return cached;
+    return { provider: 'codex', tiers: [], tokenExpired: true, error };
+  }
+
   try {
     const res = await fetch(CODEX_USAGE_URL, {
       headers: {
@@ -486,7 +776,12 @@ async function fetchCodexUsage(): Promise<ProviderUsage> {
 
     if (!res.ok) {
       if (res.status === 401) {
-        return { provider: 'codex', tiers: [], tokenExpired: true };
+        const error = appServerError
+          ? `Codex app-server: ${appServerError}; HTTP fallback token rejected`
+          : 'Codex HTTP fallback token rejected';
+        const cached = await readCachedCodexUsage(error);
+        if (cached) return cached;
+        return { provider: 'codex', tiers: [], error };
       }
       const error = appServerError
         ? `Codex app-server: ${appServerError}; HTTP fallback: ${res.status}`
@@ -528,37 +823,38 @@ async function fetchCodexUsage(): Promise<ProviderUsage> {
 // --- Cache ---
 
 interface CacheEntry {
-  result: ProviderUsage[];
+  result: ProviderUsage;
   fetchedAt: number;
 }
 
-let cache: CacheEntry | null = null;
-let inflight: Promise<ProviderUsage[]> | null = null;
+const cache = new Map<Provider, CacheEntry>();
+const inflight = new Map<Provider, Promise<ProviderUsage>>();
+
+export async function fetchProviderUsage(provider: Provider): Promise<ProviderUsage> {
+  const now = Date.now();
+  const cached = cache.get(provider);
+  if (cached && now - cached.fetchedAt < CACHE_TTL_MS) {
+    return cached.result;
+  }
+
+  const running = inflight.get(provider);
+  if (running) return running;
+
+  const request = (provider === 'claude' ? fetchClaudeUsage() : fetchCodexUsage())
+    .then(result => {
+      cache.set(provider, { result, fetchedAt: Date.now() });
+      return result;
+    })
+    .finally(() => {
+      inflight.delete(provider);
+    });
+  inflight.set(provider, request);
+  return request;
+}
 
 export async function fetchAllUsage(): Promise<ProviderUsage[]> {
-  const now = Date.now();
-
-  if (cache && now - cache.fetchedAt < CACHE_TTL_MS) {
-    return cache.result;
-  }
-
-  if (inflight) {
-    return inflight;
-  }
-
-  inflight = (async () => {
-    try {
-      const [claudeUsage, codexUsage] = await Promise.all([
-        fetchClaudeUsage(),
-        fetchCodexUsage(),
-      ]);
-      const result = [claudeUsage, codexUsage];
-      cache = { result, fetchedAt: Date.now() };
-      return result;
-    } finally {
-      inflight = null;
-    }
-  })();
-
-  return inflight;
+  return Promise.all([
+    fetchProviderUsage('claude'),
+    fetchProviderUsage('codex'),
+  ]);
 }

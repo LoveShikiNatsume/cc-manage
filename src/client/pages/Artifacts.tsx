@@ -28,6 +28,7 @@ import type {
 } from '@shared/types';
 import MarkdownView from '../components/MarkdownView';
 import {
+  deleteAllClaudeArtifactBackups,
   deleteClaudeArtifact,
   getClaudeArtifactContent,
   getClaudeArtifacts,
@@ -149,6 +150,7 @@ export default function Artifacts() {
   const [content, setContent] = useState<ClaudeArtifactContent | null>(null);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [deletingBackups, setDeletingBackups] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -195,6 +197,39 @@ export default function Artifacts() {
     } catch (err) {
       console.error(err);
       setNotice(err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
+  const backupCount = useMemo(
+    () => (overview?.groups ?? []).reduce(
+      (count, group) => count + group.items.filter(item => item.deletable).length,
+      0,
+    ),
+    [overview?.groups],
+  );
+
+  const deleteAllBackups = async () => {
+    if (backupCount === 0 || deletingBackups) return;
+    if (!confirm(`Delete all ${backupCount} backup file(s)? This cannot be undone.`)) return;
+
+    setDeletingBackups(true);
+    try {
+      const result = await deleteAllClaudeArtifactBackups();
+      setNotice(
+        result.failedCount > 0
+          ? `Deleted ${result.deletedCount} backup(s); ${result.failedCount} failed.`
+          : `Deleted all ${result.deletedCount} backup(s).`,
+      );
+      if (selectedItem?.deletable) {
+        setSelectedItem(null);
+        setContent(null);
+      }
+      await load();
+    } catch (err) {
+      console.error(err);
+      setNotice(err instanceof Error ? err.message : 'Bulk backup deletion failed');
+    } finally {
+      setDeletingBackups(false);
     }
   };
 
@@ -255,6 +290,16 @@ export default function Artifacts() {
           </div>
           <div className="flex items-center justify-between gap-2">
             <p className="truncate text-xs text-gray-400">{overview?.configDir ?? '~/.claude'}</p>
+            {backupCount > 0 && (
+              <button
+                onClick={deleteAllBackups}
+                disabled={deletingBackups}
+                className="flex shrink-0 items-center gap-1.5 rounded bg-red-50 px-2 py-1 text-xs text-red-600 hover:bg-red-100 disabled:opacity-50"
+              >
+                <Trash2 size={13} />
+                Delete backups ({backupCount})
+              </button>
+            )}
             <button
               onClick={load}
               className="flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-900"

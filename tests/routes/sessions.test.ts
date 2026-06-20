@@ -35,6 +35,19 @@ beforeEach(async () => {
 
   claudeSessionFile = path.join(claudeProjectDir, 'session-claude-001.jsonl');
   await fs.writeFile(claudeSessionFile, CLAUDE_JSONL, 'utf-8');
+  const claudeSidecarDir = path.join(claudeProjectDir, 'session-claude-001');
+  await fs.mkdir(path.join(claudeSidecarDir, 'subagents'), { recursive: true });
+  await fs.mkdir(path.join(claudeSidecarDir, 'tool-results'), { recursive: true });
+  await fs.writeFile(
+    path.join(claudeSidecarDir, 'subagents', 'agent-test.meta.json'),
+    '{"name":"test agent"}\n',
+    'utf-8',
+  );
+  await fs.writeFile(
+    path.join(claudeSidecarDir, 'tool-results', 'result.txt'),
+    'tool output',
+    'utf-8',
+  );
 
   // Setup Codex config dir: ~/.codex/sessions/<session>.jsonl
   codexConfigDir = path.join(tmpDir, 'codex');
@@ -157,6 +170,41 @@ describe('GET /api/sessions/:provider/:id/messages', () => {
     });
 
     expect(res.statusCode).toBe(404);
+    await app.close();
+  });
+});
+
+describe('GET /api/sessions/:provider/:id/artifacts', () => {
+  it('returns resources owned by the selected Claude session', async () => {
+    const app = createApp();
+    await app.ready();
+    await app.inject({ method: 'GET', url: '/api/sessions' });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/claude/session-claude-001/artifacts',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.sessionId).toBe('session-claude-001');
+    expect(body.totalCount).toBe(2);
+    expect(body.groups.find((group: any) => group.id === 'tool-results').items).toHaveLength(1);
+    expect(body.groups.find((group: any) => group.id === 'subagents').items).toHaveLength(1);
+
+    await app.close();
+  });
+
+  it('rejects session artifacts for non-Claude providers', async () => {
+    const app = createApp();
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sessions/codex/codex-session-001/artifacts',
+    });
+
+    expect(res.statusCode).toBe(400);
     await app.close();
   });
 });

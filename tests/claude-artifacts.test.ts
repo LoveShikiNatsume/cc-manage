@@ -3,8 +3,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import {
+  deleteAllClaudeArtifactBackups,
   deleteClaudeArtifact,
   listClaudeArtifacts,
+  listClaudeSessionArtifacts,
   readClaudeArtifactContent,
 } from '../src/server/services/claude-artifacts.js';
 
@@ -22,6 +24,9 @@ beforeEach(async () => {
   const sidecarDir = path.join(projectDir, 'session-001');
   await fs.mkdir(path.join(sidecarDir, 'subagents'), { recursive: true });
   await fs.mkdir(path.join(sidecarDir, 'tool-results'), { recursive: true });
+  await fs.mkdir(path.join(configDir, 'file-history', 'session-001'), { recursive: true });
+  await fs.mkdir(path.join(configDir, 'session-env', 'session-001'), { recursive: true });
+  await fs.mkdir(path.join(configDir, 'telemetry'), { recursive: true });
   await fs.mkdir(path.join(configDir, 'plans'), { recursive: true });
   await fs.mkdir(path.join(configDir, 'backups'), { recursive: true });
 
@@ -33,6 +38,13 @@ beforeEach(async () => {
   await fs.writeFile(backupFile, '{"type":"backup"}\n', 'utf-8');
   await fs.writeFile(path.join(sidecarDir, 'subagents', 'agent-1.meta.json'), '{"name":"agent"}\n', 'utf-8');
   await fs.writeFile(path.join(sidecarDir, 'tool-results', 'result.txt'), 'tool output', 'utf-8');
+  await fs.writeFile(path.join(configDir, 'file-history', 'session-001', 'file@v1'), 'old content', 'utf-8');
+  await fs.writeFile(path.join(configDir, 'session-env', 'session-001', 'env.txt'), 'A=B\n', 'utf-8');
+  await fs.writeFile(
+    path.join(configDir, 'telemetry', '1p_failed_events.session-001.event.json'),
+    '{}\n',
+    'utf-8',
+  );
   await fs.writeFile(planFile, '# Plan\n\n- ship it\n', 'utf-8');
   await fs.writeFile(path.join(configDir, 'backups', '.claude.json.backup.2026'), '{}\n', 'utf-8');
 });
@@ -42,7 +54,7 @@ afterEach(async () => {
 });
 
 describe('listClaudeArtifacts', () => {
-  it('lists Claude sidecars, plans, and deletable backups', async () => {
+  it('lists global artifacts and backups without flattening session-owned resources', async () => {
     const overview = await listClaudeArtifacts(configDir);
     const groups = new Map(overview.groups.map(group => [group.id, group]));
 
@@ -51,18 +63,39 @@ describe('listClaudeArtifacts', () => {
       deletable: true,
       sessionId: 'session-001',
     });
-    expect(groups.get('subagents')?.items[0]).toMatchObject({
-      kind: 'subagent',
-      deletable: false,
-    });
-    expect(groups.get('tool-results')?.items[0]).toMatchObject({
-      kind: 'tool-result',
-    });
+    expect(groups.has('subagents')).toBe(false);
+    expect(groups.has('tool-results')).toBe(false);
+    expect(groups.has('file-history')).toBe(false);
+    expect(groups.has('session-env')).toBe(false);
+    expect(groups.has('telemetry')).toBe(false);
     expect(groups.get('plans')?.items[0]).toMatchObject({
       kind: 'plan',
       contentType: 'markdown',
     });
     expect(groups.get('root-config')?.items.some(item => item.kind === 'config-backup')).toBe(true);
+  });
+});
+
+describe('listClaudeSessionArtifacts', () => {
+  it('lists tool results and subagents for the owning session only', async () => {
+    const result = await listClaudeSessionArtifacts(sessionFile, { configDir });
+    const groups = new Map(result.groups.map(group => [group.id, group]));
+
+    expect(result.sessionId).toBe('session-001');
+    expect(result.totalCount).toBe(6);
+    expect(groups.get('subagents')?.items[0]).toMatchObject({
+      kind: 'subagent',
+      sessionId: 'session-001',
+      deletable: false,
+    });
+    expect(groups.get('tool-results')?.items[0]).toMatchObject({
+      kind: 'tool-result',
+      sessionId: 'session-001',
+    });
+    expect(groups.get('file-history')?.items[0]).toMatchObject({ kind: 'file-history' });
+    expect(groups.get('session-env')?.items[0]).toMatchObject({ kind: 'session-env' });
+    expect(groups.get('telemetry')?.items[0]).toMatchObject({ kind: 'telemetry' });
+    expect(groups.get('session-backups')?.items[0]).toMatchObject({ kind: 'session-backup' });
   });
 });
 
@@ -93,5 +126,15 @@ describe('deleteClaudeArtifact', () => {
   it('does not delete original session JSONL files', async () => {
     await expect(deleteClaudeArtifact(sessionFile, { configDir })).rejects.toThrow(/backup/);
     await expect(fs.access(sessionFile)).resolves.toBeUndefined();
+  });
+
+  it('deletes every recognized backup without touching original files', async () => {
+    const result = await deleteAllClaudeArtifactBackups({ configDir });
+
+    expect(result).toEqual({ ok: true, deletedCount: 2, failedCount: 0 });
+    await expect(fs.access(backupFile)).rejects.toThrow();
+    await expect(fs.access(path.join(configDir, 'backups', '.claude.json.backup.2026'))).rejects.toThrow();
+    await expect(fs.access(sessionFile)).resolves.toBeUndefined();
+    await expect(fs.access(planFile)).resolves.toBeUndefined();
   });
 });

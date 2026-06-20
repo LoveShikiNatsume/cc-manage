@@ -78,6 +78,8 @@ export interface ClaudeRepairStats {
   roots: number;
   shown: number;
   hidden: number;
+  compactions: number;
+  invalidCompactions: number;
 }
 
 export interface ClaudeRepairIssue extends ClaudeRepairStats {
@@ -86,6 +88,8 @@ export interface ClaudeRepairIssue extends ClaudeRepairStats {
   project: string;
   filePath: string;
   lastActivity: number;
+  repairable: boolean;
+  repairBlockedReason?: string;
 }
 
 export interface ClaudeRepairResult {
@@ -209,6 +213,12 @@ export interface ClaudeArtifactsOverview {
   groups: ClaudeArtifactGroup[];
 }
 
+export interface ClaudeSessionArtifacts {
+  sessionId: string;
+  totalCount: number;
+  groups: ClaudeArtifactGroup[];
+}
+
 export interface ClaudeArtifactContent extends ClaudeArtifactItem {
   encoding: 'utf-8' | 'base64' | 'none';
   content?: string;
@@ -218,4 +228,10 @@ export interface ClaudeArtifactContent extends ClaudeArtifactItem {
 export interface ClaudeArtifactDeleteResult {
   ok: boolean;
   path: string;
+}
+
+export interface ClaudeArtifactBulkDeleteResult {
+  ok: boolean;
+  deletedCount: number;
+  failedCount: number;
 }

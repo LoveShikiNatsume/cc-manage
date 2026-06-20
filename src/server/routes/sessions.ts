@@ -20,6 +20,7 @@ import {
 } from '../services/claude-repair.js';
 import { recordCliSessionDeleted } from '../services/claude-desktop-sync/state.js';
 import { withClaudeJsonlWriteLock } from '../services/claude-jsonl-lock.js';
+import { listClaudeSessionArtifacts } from '../services/claude-artifacts.js';
 
 interface SessionsPluginOptions {
   claudeConfigDir?: string;
@@ -167,6 +168,36 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     }
   });
 
+  // GET /api/sessions/:provider/:id/artifacts — resources owned by one Claude session
+  app.get<{
+    Params: { provider: string; id: string };
+  }>('/api/sessions/:provider/:id/artifacts', async (req, reply) => {
+    const { provider, id } = req.params;
+    if (provider !== 'claude') {
+      return reply.status(400).send({ error: 'Session artifacts are only supported for Claude sessions' });
+    }
+
+    let entry = sessionMap.get(sessionKey(provider as Provider, id));
+    if (!entry) {
+      await refreshSessionMap(claudeConfigDir, codexConfigDir);
+      entry = sessionMap.get(sessionKey(provider as Provider, id));
+    }
+    if (!entry) {
+      return reply.status(404).send({ error: 'Session not found' });
+    }
+
+    try {
+      const artifacts = await listClaudeSessionArtifacts(entry.filePath, {
+        configDir: claudeConfigDir,
+      });
+      return reply.send(artifacts);
+    } catch (err) {
+      return reply
+        .status(500)
+        .send({ error: err instanceof Error ? err.message : 'Failed to list session artifacts' });
+    }
+  });
+
   // PATCH /api/sessions/:provider/:id — rename
   app.patch<{
     Params: { provider: string; id: string };
@@ -224,7 +255,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
         configDir: claudeConfigDir,
         backup: req.body?.backup,
       });
-      if (result.ok) {
+      if (result.ok && result.changed) {
         queueClaudeDesktopSync('manage:repair-session');
       }
       return reply.send(result);

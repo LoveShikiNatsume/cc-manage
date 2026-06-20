@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useVisibilityPolling } from '../hooks/useVisibilityPolling';
-import { getUsage } from '../lib/api';
+import { getProviderUsage } from '../lib/api';
 import { RefreshCw, AlertTriangle } from 'lucide-react';
 import type { ProviderUsage } from '@shared/types';
 
@@ -41,12 +41,18 @@ function UsageCard({ usage }: { usage: ProviderUsage }) {
       {usage.tokenExpired && (
         <div className="flex items-center gap-2 text-amber-600 text-xs mb-3">
           <AlertTriangle size={14} />
-          <span>OAuth token expired — re-login to {providerLabel} to refresh</span>
+          <span>{providerLabel} is signed out — login is required</span>
         </div>
       )}
 
       {usage.error && !usage.tokenExpired && (
         <div className="text-red-500 text-xs mb-3">Error: {usage.error}</div>
+      )}
+
+      {typeof usage.extra?.cachedAt === 'number' && (
+        <div className="mb-3 text-xs text-amber-600">
+          Showing cached data from {new Date(usage.extra.cachedAt).toLocaleTimeString()}
+        </div>
       )}
 
       {usage.tiers.length === 0 && !usage.error && !usage.tokenExpired && (
@@ -84,15 +90,35 @@ function UsageCard({ usage }: { usage: ProviderUsage }) {
 export default function Usage() {
   const [data, setData] = useState<ProviderUsage[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number>(0);
+  const [loading, setLoading] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
 
   const fetchUsage = useCallback(async () => {
-    try {
-      const result = await getUsage();
-      setData(result);
+    setLoading(true);
+    setRequestError(null);
+    const results = await Promise.allSettled(
+      (['claude', 'codex'] as const).map(async provider => {
+        const usage = await getProviderUsage(provider);
+        setData(current => {
+          const next = current.filter(item => item.provider !== provider);
+          next.push(usage);
+          return next.sort((a, b) => a.provider.localeCompare(b.provider));
+        });
+        return usage;
+      }),
+    );
+    const failures = results.filter(result => result.status === 'rejected');
+    if (failures.length < results.length) {
       setLastUpdated(Date.now());
-    } catch {
-      // Will retry on next interval
     }
+    if (failures.length > 0) {
+      setRequestError(
+        failures.length === results.length
+          ? 'Unable to load usage data. Check the server connection and try again.'
+          : 'One provider could not be refreshed; available usage is shown below.',
+      );
+    }
+    setLoading(false);
   }, []);
 
   useVisibilityPolling(fetchUsage, 60_000);
@@ -109,16 +135,24 @@ export default function Usage() {
           )}
           <button
             onClick={fetchUsage}
+            disabled={loading}
             className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100"
             title="Refresh now"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
+      {requestError && (
+        <div className="mb-4 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          {requestError}
+        </div>
+      )}
       <div className="space-y-4">
         {data.length === 0 ? (
-          <div className="text-gray-400 text-sm">Loading usage data...</div>
+          <div className="text-gray-400 text-sm">
+            {loading ? 'Loading usage data...' : 'No usage data available'}
+          </div>
         ) : (
           data.map(usage => <UsageCard key={usage.provider} usage={usage} />)
         )}

@@ -56,11 +56,34 @@ function isMain(row: any): boolean {
   );
 }
 
+function isCompactBoundary(row: any): boolean {
+  return row?.type === 'system' && row?.subtype === 'compact_boundary';
+}
+
+/**
+ * Claude may deliberately start a new physical tree when compacting a session.
+ * In that case logicalParentUuid is the bridge back to the pre-compact history.
+ * Prefer a valid physical parent, and only use the logical parent as a fallback:
+ * some Claude versions write both fields with different (but valid) meanings.
+ */
+function effectiveParentUuid(row: any, byUuid: Map<string, any>): string | null {
+  const parentUuid = typeof row?.parentUuid === 'string' ? row.parentUuid : null;
+  if (parentUuid && byUuid.has(parentUuid)) return parentUuid;
+
+  const logicalParentUuid =
+    typeof row?.logicalParentUuid === 'string' ? row.logicalParentUuid : null;
+  if (isCompactBoundary(row) && logicalParentUuid && byUuid.has(logicalParentUuid)) {
+    return logicalParentUuid;
+  }
+
+  return parentUuid;
+}
+
 function canonicalSet(rows: any[], byUuid: Map<string, any>): Set<string> {
   let leaf: string | null = null;
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i];
-    if (row?.uuid && (row.type === 'assistant' || row.type === 'user')) {
+    if (isMain(row) && (row.type === 'assistant' || row.type === 'user')) {
       leaf = row.uuid;
       break;
     }
@@ -69,8 +92,9 @@ function canonicalSet(rows: any[], byUuid: Map<string, any>): Set<string> {
   const seen = new Set<string>();
   let current = leaf;
   while (current && byUuid.has(current)) {
+    if (seen.has(current)) break;
     seen.add(current);
-    current = byUuid.get(current)?.parentUuid ?? null;
+    current = effectiveParentUuid(byUuid.get(current), byUuid);
   }
   return seen;
 }
@@ -90,10 +114,20 @@ export async function scanClaudeRepairFile(filePath: string): Promise<ClaudeRepa
   const rows = await loadJsonl(filePath);
   const byUuid = new Map<string, any>();
   for (const row of rows) {
-    if (row?.uuid) byUuid.set(row.uuid, row);
+    if (isMain(row) && !byUuid.has(row.uuid)) byUuid.set(row.uuid, row);
   }
 
-  const roots = [...byUuid.values()].filter(row => !byUuid.has(row.parentUuid)).length;
+  const compactions = [...byUuid.values()].filter(isCompactBoundary);
+  const invalidCompactions = compactions.filter(row => {
+    const physicalParentIsValid =
+      typeof row.parentUuid === 'string' && byUuid.has(row.parentUuid);
+    const logicalParentIsValid =
+      typeof row.logicalParentUuid === 'string' && byUuid.has(row.logicalParentUuid);
+    return !physicalParentIsValid && !logicalParentIsValid;
+  }).length;
+  const roots = [...byUuid.values()].filter(
+    row => !byUuid.has(effectiveParentUuid(row, byUuid) ?? ''),
+  ).length;
   const canonical = canonicalSet(rows, byUuid);
   const shown = [...canonical].filter(uuid => hasAssistantText(byUuid.get(uuid))).length;
   const hidden = [...byUuid.entries()].filter(
@@ -105,6 +139,8 @@ export async function scanClaudeRepairFile(filePath: string): Promise<ClaudeRepa
     roots,
     shown,
     hidden,
+    compactions: compactions.length,
+    invalidCompactions,
   };
 }
 
@@ -161,6 +197,10 @@ export async function scanClaudeRepairIssues(
         project: meta.project,
         filePath,
         lastActivity: meta.lastActivity,
+        repairable: stats.compactions === 0,
+        repairBlockedReason: stats.compactions > 0
+          ? 'Automatic repair is disabled for compacted sessions to preserve Claude compact boundaries.'
+          : undefined,
       });
     } catch {
       // Skip unreadable or malformed sessions.
@@ -230,6 +270,7 @@ async function repairClaudeSessionFileUnlocked(
     backup?: boolean;
     dryRun?: boolean;
     backupDir?: string;
+    force?: boolean;
   } = {},
 ): Promise<ClaudeRepairResult> {
   await validatePath(filePath, opts.configDir);
@@ -247,6 +288,43 @@ async function repairClaudeSessionFileUnlocked(
       droppedOrphans: 0,
       leaf: null,
       error: 'Empty session file',
+    };
+  }
+
+  if (before.compactions > 0 && (before.hidden > 0 || before.roots > 1 || opts.force)) {
+    return {
+      ok: false,
+      filePath,
+      dryRun: opts.dryRun,
+      before,
+      after: before,
+      changed: false,
+      mainNodes: before.nodes,
+      relinked: 0,
+      inserted: 0,
+      droppedOrphans: 0,
+      leaf: null,
+      error: 'Automatic repair refused: this session contains Claude compact boundaries and requires manual review.',
+    };
+  }
+
+  if (before.hidden === 0 && before.roots <= 1 && !opts.force) {
+    const main = rows.filter(isMain);
+    const leaf = [...main]
+      .reverse()
+      .find(row => row.type === 'assistant' || row.type === 'user')?.uuid ?? null;
+    return {
+      ok: true,
+      filePath,
+      dryRun: opts.dryRun,
+      before,
+      after: before,
+      changed: false,
+      mainNodes: new Set(main.map(row => row.uuid)).size,
+      relinked: 0,
+      inserted: 0,
+      droppedOrphans: 0,
+      leaf,
     };
   }
 
@@ -459,6 +537,7 @@ export async function repairClaudeSessionFile(
     backup?: boolean;
     dryRun?: boolean;
     backupDir?: string;
+    force?: boolean;
   } = {},
 ): Promise<ClaudeRepairResult> {
   return withClaudeJsonlWriteLock(() => repairClaudeSessionFileUnlocked(filePath, opts));
@@ -470,6 +549,13 @@ async function deleteClaudeSessionMessagesUnlocked(
   opts: { configDir?: string; backup?: boolean; backupDir?: string } = {},
 ): Promise<ClaudeMessageDeleteResult> {
   await validatePath(filePath, opts.configDir);
+
+  const before = await scanClaudeRepairFile(filePath);
+  if (before.compactions > 0) {
+    throw new Error(
+      'Message deletion is disabled for compacted Claude sessions because relinking could corrupt compact history.',
+    );
+  }
 
   const requested = new Set(messageIds.filter(Boolean));
   if (requested.size === 0) {
@@ -510,7 +596,11 @@ async function deleteClaudeSessionMessagesUnlocked(
     const repair = await repairClaudeSessionFile(tempPath, {
       configDir: opts.configDir,
       backup: false,
+      force: true,
     });
+    if (!repair.ok) {
+      throw new Error(repair.error ?? 'Claude session could not be repaired after message deletion');
+    }
     const repairedContent = await fs.readFile(tempPath, 'utf-8');
     await fs.writeFile(filePath, repairedContent, 'utf-8');
 

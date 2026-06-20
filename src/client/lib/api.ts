@@ -12,6 +12,8 @@ import type {
   ClaudeArtifactsOverview,
   ClaudeArtifactContent,
   ClaudeArtifactDeleteResult,
+  ClaudeArtifactBulkDeleteResult,
+  ClaudeSessionArtifacts,
 } from '@shared/types';
 
 const BASE = '/api';
@@ -36,6 +38,12 @@ export const getSessions = (): Promise<ProviderGroup[]> =>
 
 export const getMessages = (provider: string, id: string): Promise<SessionMessage[]> =>
   request(`/sessions/${provider}/${encodeURIComponent(id)}/messages`);
+
+export const getSessionArtifacts = (
+  provider: string,
+  id: string,
+): Promise<ClaudeSessionArtifacts> =>
+  request(`/sessions/${provider}/${encodeURIComponent(id)}/artifacts`);
 
 export const renameSession = (provider: string, id: string, title: string): Promise<void> =>
   request(`/sessions/${provider}/${encodeURIComponent(id)}`, {
@@ -139,6 +147,9 @@ export const getCodexMemory = (): Promise<CodexMemoryEntry[]> =>
 export const getUsage = (): Promise<ProviderUsage[]> =>
   request('/usage');
 
+export const getProviderUsage = (provider: string): Promise<ProviderUsage> =>
+  request(`/usage/${provider}`);
+
 // ─── Claude Artifacts ────────────────────────────────────────────────────────
 
 export const getClaudeArtifacts = (): Promise<ClaudeArtifactsOverview> =>
@@ -152,3 +163,6 @@ export const deleteClaudeArtifact = (filePath: string): Promise<ClaudeArtifactDe
     method: 'DELETE',
     body: JSON.stringify({ path: filePath }),
   });
+
+export const deleteAllClaudeArtifactBackups = (): Promise<ClaudeArtifactBulkDeleteResult> =>
+  request('/claude-artifacts/backups', { method: 'DELETE' });

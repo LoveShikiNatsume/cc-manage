@@ -5,11 +5,13 @@ import type { Dirent } from 'fs';
 import type {
   ClaudeArtifactContent,
   ClaudeArtifactContentType,
+  ClaudeArtifactBulkDeleteResult,
   ClaudeArtifactDeleteResult,
   ClaudeArtifactGroup,
   ClaudeArtifactItem,
   ClaudeArtifactKind,
   ClaudeArtifactsOverview,
+  ClaudeSessionArtifacts,
 } from '@shared/types.js';
 
 const MAX_ITEMS_PER_GROUP = 500;
@@ -53,15 +55,6 @@ async function validatePath(filePath: string, configDir?: string): Promise<strin
   }
 
   return resolved;
-}
-
-async function exists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function readDirSafe(dir: string): Promise<Dirent[]> {
@@ -370,8 +363,6 @@ function buildGroup(
 async function listProjectArtifacts(configDir: string): Promise<ClaudeArtifactGroup[]> {
   const projectsDir = path.join(configDir, 'projects');
   const backups: CollectState = { items: [], truncated: false };
-  const subagents: CollectState = { items: [], truncated: false };
-  const toolResults: CollectState = { items: [], truncated: false };
   const projectFiles: CollectState = { items: [], truncated: false };
   const projects = await readDirSafe(projectsDir);
 
@@ -393,19 +384,6 @@ async function listProjectArtifacts(configDir: string): Promise<ClaudeArtifactGr
         }
         continue;
       }
-
-      if (!entry.isDirectory()) continue;
-      if (entry.name === 'memory') continue;
-
-      const subagentsDir = path.join(entryPath, 'subagents');
-      if (await exists(subagentsDir)) {
-        await collectFiles(subagentsDir, subagents, configDir, { maxDepth: 2 });
-      }
-
-      const toolResultsDir = path.join(entryPath, 'tool-results');
-      if (await exists(toolResultsDir)) {
-        await collectFiles(toolResultsDir, toolResults, configDir, { maxDepth: 6 });
-      }
     }
   }
 
@@ -417,18 +395,6 @@ async function listProjectArtifacts(configDir: string): Promise<ClaudeArtifactGr
       backups,
     ),
     buildGroup(
-      'subagents',
-      'Subagents',
-      'Subagent transcripts and metadata attached to Claude sessions.',
-      subagents,
-    ),
-    buildGroup(
-      'tool-results',
-      'Tool Results',
-      'Tool output files, text captures, images, and document-rendering artifacts attached to sessions.',
-      toolResults,
-    ),
-    buildGroup(
       'project-files',
       'Project Files',
       'Other non-session project files stored by Claude, excluding memory files shown in the Memory tab.',
@@ -437,13 +403,95 @@ async function listProjectArtifacts(configDir: string): Promise<ClaudeArtifactGr
   ];
 }
 
+export async function listClaudeSessionArtifacts(
+  sessionFilePath: string,
+  opts: { configDir?: string } = {},
+): Promise<ClaudeSessionArtifacts> {
+  const configDir = path.resolve(opts.configDir ?? getClaudeConfigDir());
+  const resolved = await validatePath(sessionFilePath, configDir);
+  if (!resolved.endsWith('.jsonl')) {
+    throw new Error('Claude session path must be a JSONL file');
+  }
+
+  const sessionId = path.basename(resolved, '.jsonl');
+  const sidecarDir = path.join(path.dirname(resolved), sessionId);
+  const subagents: CollectState = { items: [], truncated: false };
+  const toolResults: CollectState = { items: [], truncated: false };
+  const fileHistory: CollectState = { items: [], truncated: false };
+  const sessionEnv: CollectState = { items: [], truncated: false };
+  const telemetry: CollectState = { items: [], truncated: false };
+  const backups: CollectState = { items: [], truncated: false };
+  const referencedPlans: CollectState = { items: [], truncated: false };
+  const referencedJobs: CollectState = { items: [], truncated: false };
+  const referencedSnapshots: CollectState = { items: [], truncated: false };
+  const referencedProjectFiles: CollectState = { items: [], truncated: false };
+
+  await collectFiles(path.join(sidecarDir, 'subagents'), subagents, configDir, { maxDepth: 2 });
+  await collectFiles(path.join(sidecarDir, 'tool-results'), toolResults, configDir, { maxDepth: 6 });
+  await collectFiles(path.join(configDir, 'file-history', sessionId), fileHistory, configDir, { maxDepth: 3 });
+  await collectFiles(path.join(configDir, 'session-env', sessionId), sessionEnv, configDir, { maxDepth: 3 });
+  await collectFiles(path.join(configDir, 'telemetry'), telemetry, configDir, {
+    maxDepth: 4,
+    include: entry => entry.name.includes(`.${sessionId}.`),
+  });
+
+  const projectDir = path.dirname(resolved);
+  const projectEntries = await readDirSafe(projectDir);
+  for (const entry of projectEntries) {
+    if (!entry.isFile()) continue;
+    if (isSessionBackupName(entry.name) && sessionIdFromBackup(entry.name) === sessionId) {
+      await pushItem(backups, path.join(projectDir, entry.name), configDir);
+    }
+  }
+
+  const sessionText = await fs.readFile(resolved, 'utf-8').catch(() => '');
+  const collectReferenced = async (root: string, state: CollectState, maxDepth: number) => {
+    await collectFiles(root, state, configDir, {
+      maxDepth,
+      include: entry => sessionText.includes(entry.name),
+    });
+  };
+  await collectReferenced(path.join(configDir, 'plans'), referencedPlans, 2);
+  await collectReferenced(path.join(configDir, 'shell-snapshots'), referencedSnapshots, 1);
+
+  const allJobs: CollectState = { items: [], truncated: false };
+  await collectFiles(path.join(configDir, 'jobs'), allJobs, configDir, { maxDepth: 3 });
+  for (const item of allJobs.items) {
+    const text = await fs.readFile(item.path, 'utf-8').catch(() => '');
+    if (text.includes(sessionId)) referencedJobs.items.push(item);
+  }
+
+  for (const entry of projectEntries) {
+    if (!entry.isFile() || entry.name.endsWith('.jsonl') || isSessionBackupName(entry.name)) continue;
+    if (sessionText.includes(entry.name)) {
+      await pushItem(referencedProjectFiles, path.join(projectDir, entry.name), configDir);
+    }
+  }
+
+  const groups = [
+    buildGroup('tool-results', 'Tool Results', 'Tool output files attached to this Claude session.', toolResults),
+    buildGroup('subagents', 'Subagents', 'Subagent transcripts and metadata attached to this Claude session.', subagents),
+    buildGroup('file-history', 'File History', 'File versions captured while this session edited the workspace.', fileHistory),
+    buildGroup('session-env', 'Session Environment', 'Environment snapshots owned by this session.', sessionEnv),
+    buildGroup('telemetry', 'Diagnostics', 'Claude diagnostic events tagged with this session id.', telemetry),
+    buildGroup('plans', 'Referenced Plans', 'Plan files explicitly referenced by this conversation.', referencedPlans),
+    buildGroup('jobs', 'Background Jobs', 'Job state files that reference this session id.', referencedJobs),
+    buildGroup('shell-snapshots', 'Shell Snapshots', 'Shell snapshots explicitly referenced by this conversation.', referencedSnapshots),
+    buildGroup('session-backups', 'Session Backups', 'Backups of this session created before repairs or message edits.', backups),
+    buildGroup('project-files', 'Referenced Project Files', 'Project helper files explicitly referenced by this conversation.', referencedProjectFiles),
+  ].filter(group => group.items.length > 0);
+
+  return {
+    sessionId,
+    totalCount: groups.reduce((sum, group) => sum + group.totalCount, 0),
+    groups,
+  };
+}
+
 async function listGlobalArtifacts(configDir: string): Promise<ClaudeArtifactGroup[]> {
   const plans: CollectState = { items: [], truncated: false };
   const jobs: CollectState = { items: [], truncated: false };
   const snapshots: CollectState = { items: [], truncated: false };
-  const env: CollectState = { items: [], truncated: false };
-  const history: CollectState = { items: [], truncated: false };
-  const telemetry: CollectState = { items: [], truncated: false };
   const cache: CollectState = { items: [], truncated: false };
   const config: CollectState = { items: [], truncated: false };
   const large: CollectState = { items: [], truncated: false };
@@ -451,9 +499,6 @@ async function listGlobalArtifacts(configDir: string): Promise<ClaudeArtifactGro
   await collectFiles(path.join(configDir, 'plans'), plans, configDir, { maxDepth: 2 });
   await collectFiles(path.join(configDir, 'jobs'), jobs, configDir, { maxDepth: 3 });
   await collectFiles(path.join(configDir, 'shell-snapshots'), snapshots, configDir, { maxDepth: 1 });
-  await collectFiles(path.join(configDir, 'session-env'), env, configDir, { maxDepth: 3 });
-  await collectFiles(path.join(configDir, 'file-history'), history, configDir, { maxDepth: 3 });
-  await collectFiles(path.join(configDir, 'telemetry'), telemetry, configDir, { maxDepth: 4 });
   await collectFiles(path.join(configDir, 'cache'), cache, configDir, { maxDepth: 3 });
   await collectFiles(path.join(configDir, 'backups'), config, configDir, { maxDepth: 2 });
 
@@ -489,9 +534,6 @@ async function listGlobalArtifacts(configDir: string): Promise<ClaudeArtifactGro
     buildGroup('plans', 'Plans', 'Markdown plans stored under ~/.claude/plans.', plans),
     buildGroup('jobs', 'Jobs', 'Claude job state and pin files.', jobs),
     buildGroup('shell-snapshots', 'Shell Snapshots', 'Shell environment snapshots captured by Claude.', snapshots),
-    buildGroup('session-env', 'Session Env', 'Per-session environment snapshots.', env),
-    buildGroup('file-history', 'File History', 'Historical file snapshots stored by Claude.', history),
-    buildGroup('telemetry', 'Telemetry', 'Local Claude telemetry JSON files.', telemetry),
     buildGroup('cache-config', 'Cache & Config', 'Cache files, logs, settings, and Claude config backups.', cache),
     buildGroup('root-config', 'Root Config', 'Global Claude settings, logs, and backup files.', config),
     buildGroup('large-storage', 'Large Storage', 'Runtime and plugin directories are shown as read-only summaries.', large),
@@ -572,4 +614,20 @@ export async function deleteClaudeArtifact(
 
   await fs.rm(resolved, { force: true });
   return { ok: true, path: resolved };
+}
+
+export async function deleteAllClaudeArtifactBackups(
+  opts: { configDir?: string } = {},
+): Promise<ClaudeArtifactBulkDeleteResult> {
+  const overview = await listClaudeArtifacts(opts.configDir);
+  const backups = overview.groups.flatMap(group => group.items).filter(item => item.deletable);
+  const results = await Promise.allSettled(
+    backups.map(item => deleteClaudeArtifact(item.path, opts)),
+  );
+  const deletedCount = results.filter(result => result.status === 'fulfilled').length;
+  return {
+    ok: deletedCount === results.length,
+    deletedCount,
+    failedCount: results.length - deletedCount,
+  };
 }
