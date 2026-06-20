@@ -45,6 +45,23 @@ npm run desktop:dist:win
 
 Artifacts are written to `release/`.
 
+## Tray and Claude Desktop sync
+
+The packaged desktop app stays resident in the Windows tray. Closing the main
+window hides it; use the tray menu to open it again or quit the background
+process.
+
+When Claude Desktop data directories are present, cc-manage starts the integrated
+Claude Desktop session sync in the background. It preserves the standalone sync
+behavior: Claude Desktop is not modified while its process is running. If
+cc-manage changes Claude JSONL while Claude Desktop is already closed, sync is
+requested immediately. If Claude Desktop is running, the request remains pending
+and runs after Claude Desktop closes.
+
+Set `CC_MANAGE_CLAUDE_DESKTOP_SYNC=0` to disable the background sync. Set
+`CC_MANAGE_CLAUDE_DESKTOP_SYNC_INTERVAL` to change the polling interval in
+seconds.
+
 ## Notes
 
 - The app starts on port `3456` when available, then tries the next local ports

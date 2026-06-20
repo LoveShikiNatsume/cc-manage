@@ -1,12 +1,14 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import type { Dirent } from 'fs';
 import type { SessionMeta, SessionMessage } from '@shared/types.js';
 import {
   readHeadTail,
   extractClaudeSessionMeta,
   parseClaudeMessages,
 } from '../services/session-parser.js';
+import { withClaudeJsonlWriteLock } from '../services/claude-jsonl-lock.js';
 
 export function getClaudeConfigDir(): string {
   return path.join(os.homedir(), '.claude');
@@ -53,7 +55,7 @@ export async function discoverClaudeSessions(configDir?: string): Promise<Sessio
   const sessions: SessionMeta[] = [];
 
   // Enumerate project subdirectories
-  let projectEntries: fs.Dirent[];
+  let projectEntries: Dirent[];
   try {
     projectEntries = await fs.readdir(projectsDir, { withFileTypes: true });
   } catch {
@@ -64,7 +66,7 @@ export async function discoverClaudeSessions(configDir?: string): Promise<Sessio
     if (!projectEntry.isDirectory()) continue;
     const projectPath = path.join(projectsDir, projectEntry.name);
 
-    let fileEntries: fs.Dirent[];
+    let fileEntries: Dirent[];
     try {
       fileEntries = await fs.readdir(projectPath, { withFileTypes: true });
     } catch {
@@ -108,16 +110,18 @@ export async function deleteClaudeSession(
 ): Promise<void> {
   await validatePath(filePath, configDir);
 
-  // Remove the JSONL file
-  await fs.unlink(filePath);
+  await withClaudeJsonlWriteLock(async () => {
+    // Remove the JSONL file
+    await fs.unlink(filePath);
 
-  // Remove the sidecar directory (same name without .jsonl extension)
-  const sidecarDir = filePath.replace(/\.jsonl$/, '');
-  try {
-    await fs.rm(sidecarDir, { recursive: true, force: true });
-  } catch {
-    // Sidecar directory might not exist; that's fine
-  }
+    // Remove the sidecar directory (same name without .jsonl extension)
+    const sidecarDir = filePath.replace(/\.jsonl$/, '');
+    try {
+      await fs.rm(sidecarDir, { recursive: true, force: true });
+    } catch {
+      // Sidecar directory might not exist; that's fine
+    }
+  });
 }
 
 export async function renameClaudeSession(
@@ -127,14 +131,16 @@ export async function renameClaudeSession(
 ): Promise<void> {
   await validatePath(filePath, configDir);
 
-  const sessionId = await readClaudeSessionId(filePath);
-  const entry = {
-    type: 'custom-title',
-    ...(sessionId ? { sessionId } : {}),
-    customTitle: title,
-    timestamp: new Date().toISOString(),
-  };
+  await withClaudeJsonlWriteLock(async () => {
+    const sessionId = await readClaudeSessionId(filePath);
+    const entry = {
+      type: 'custom-title',
+      ...(sessionId ? { sessionId } : {}),
+      customTitle: title,
+      timestamp: new Date().toISOString(),
+    };
 
-  // Append a newline-terminated JSON entry to the file
-  await fs.appendFile(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+    // Append a newline-terminated JSON entry to the file
+    await fs.appendFile(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+  });
 }

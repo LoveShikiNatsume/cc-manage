@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import matter from 'gray-matter';
+import type { Dirent } from 'fs';
 import type { MemoryFileMeta, MemoryFileContent, MemoryProject } from '@shared/types.js';
 
 export function getClaudeConfigDir(): string {
@@ -48,7 +49,7 @@ export async function listMemoryProjects(configDir?: string): Promise<MemoryProj
     return [];
   }
 
-  let projectEntries: Awaited<ReturnType<typeof fs.readdir>>;
+  let projectEntries: Dirent[];
   try {
     projectEntries = await fs.readdir(projectsDir, { withFileTypes: true });
   } catch {
@@ -85,7 +86,7 @@ export async function listMemories(
 ): Promise<MemoryFileMeta[]> {
   await validatePath(memoryDir, configDir);
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(memoryDir, { withFileTypes: true });
   } catch {
@@ -207,7 +208,7 @@ export async function rebuildMemoryIndex(
 ): Promise<void> {
   await validatePath(memoryDir, configDir);
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(memoryDir, { withFileTypes: true });
   } catch {

@@ -114,6 +114,39 @@ export interface ClaudeMessageDeleteResult {
   error?: string;
 }
 
+export interface ClaudeDesktopSyncEnvironmentRoot {
+  root: string;
+  present: boolean;
+  configPresent: boolean;
+  appConfigPresent: boolean;
+  sessionCount: number;
+}
+
+export interface ClaudeDesktopSyncStatus {
+  enabled: boolean;
+  started: boolean;
+  stopped: boolean;
+  running: boolean;
+  pending: boolean;
+  claudeRunning: boolean | null;
+  pass: number;
+  environment: {
+    available: boolean;
+    reason: string | null;
+    roots: ClaudeDesktopSyncEnvironmentRoot[];
+  } | null;
+  lastRequestedAt: string | null;
+  lastRequestReason: string | null;
+  lastRunAt: string | null;
+  lastError: string | null;
+  lastSummary: {
+    written: number;
+    archived: number;
+    reconciled: number;
+    skipped: number;
+  } | null;
+}
+
 export type ClaudeArtifactKind =
   | 'session-backup'
   | 'config-backup'

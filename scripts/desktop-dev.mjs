@@ -2,10 +2,14 @@ import { spawn } from 'node:child_process';
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const isWindows = process.platform === 'win32';
 
 function run(command, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const executable = isWindows ? process.env.ComSpec || 'cmd.exe' : command;
+    const executableArgs = isWindows ? ['/d', '/s', '/c', command, ...args] : args;
+
+    const child = spawn(executable, executableArgs, {
       stdio: 'inherit',
       shell: false,
       env: process.env,
@@ -32,11 +36,13 @@ try {
   await run(npx, ['electron-rebuild', '-f', '-w', 'better-sqlite3']);
   await run(npx, ['electron', 'dist/electron/main.js']);
 } catch (err) {
+  console.error(err);
   exitCode = typeof err?.exitCode === 'number' ? err.exitCode : 1;
 } finally {
   try {
     await run(npm, ['rebuild', 'better-sqlite3']);
   } catch (err) {
+    console.error(err);
     exitCode = exitCode || (typeof err?.exitCode === 'number' ? err.exitCode : 1);
   }
 }

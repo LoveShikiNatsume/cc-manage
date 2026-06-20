@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import Database from 'better-sqlite3';
+import type { Dirent } from 'fs';
 import type { SessionMeta, SessionMessage } from '@shared/types.js';
 import {
   readHeadTail,
@@ -71,7 +72,7 @@ function readCodexThreadTitles(configDir?: string): Map<string, string> {
 async function collectJsonlFiles(dir: string): Promise<string[]> {
   const results: string[] = [];
 
-  let entries: fs.Dirent[];
+  let entries: Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {

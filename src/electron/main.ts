@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell } from 'electron';
+import { app, BrowserWindow, Menu, Tray, dialog, nativeImage, shell } from 'electron';
 import net from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { createServer } from '../server/index.js';
@@ -9,6 +9,8 @@ const DEFAULT_PORT = Number.isFinite(configuredPort) ? configuredPort : 3456;
 let mainWindow: BrowserWindow | null = null;
 let backend: FastifyInstance | null = null;
 let backendUrl = '';
+let tray: Tray | null = null;
+let isQuitting = false;
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -33,6 +35,45 @@ async function startBackend(): Promise<string> {
   backend = await createServer({ port, host: '127.0.0.1' });
   backendUrl = `http://127.0.0.1:${port}`;
   return backendUrl;
+}
+
+function createTrayIcon() {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+      <rect width="32" height="32" rx="7" fill="#2563eb"/>
+      <path d="M10 10h12v3H13v6h9v3H10z" fill="#fff"/>
+    </svg>
+  `;
+  return nativeImage.createFromDataURL(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`);
+}
+
+function showMainWindow(): void {
+  if (!mainWindow && backendUrl) {
+    createWindow(backendUrl);
+    return;
+  }
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray(): void {
+  if (tray) return;
+  tray = new Tray(createTrayIcon());
+  tray.setToolTip('cc-manage');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open cc-manage', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+  tray.on('click', showMainWindow);
 }
 
 function createWindow(url: string): void {
@@ -60,6 +101,16 @@ function createWindow(url: string): void {
     return { action: 'deny' };
   });
 
+  mainWindow.on('close', event => {
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow?.hide();
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
   mainWindow.loadURL(`${url}/sessions`);
 }
 
@@ -71,17 +122,13 @@ if (!gotLock) {
 }
 
 app.on('second-instance', () => {
-  if (!mainWindow && backendUrl) {
-    createWindow(backendUrl);
-    return;
-  }
-  if (mainWindow?.isMinimized()) mainWindow.restore();
-  mainWindow?.focus();
+  showMainWindow();
 });
 
 app.whenReady()
   .then(async () => {
     const url = await startBackend();
+    createTray();
     createWindow(url);
   })
   .catch(err => {
@@ -93,18 +140,17 @@ app.whenReady()
   });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0 && backendUrl) {
-    createWindow(backendUrl);
-  }
+  showMainWindow();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (isQuitting && process.platform !== 'darwin') {
     app.quit();
   }
 });
 
 app.on('before-quit', async event => {
+  isQuitting = true;
   if (!backend) return;
   event.preventDefault();
   const server = backend;

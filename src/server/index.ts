@@ -7,6 +7,11 @@ import { sessionsRoutes } from './routes/sessions.js';
 import { memoryRoutes } from './routes/memory.js';
 import { usageRoutes } from './routes/usage.js';
 import { claudeArtifactsRoutes } from './routes/claude-artifacts.js';
+import { claudeDesktopSyncRoutes } from './routes/claude-desktop-sync.js';
+import {
+  startClaudeDesktopAutoSync,
+  type ClaudeDesktopAutoSyncController,
+} from './services/claude-desktop-sync/background.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -18,10 +23,18 @@ const ALLOWED_IPS = new Set([
   '::ffff:10.195.221.240',
 ]);
 
-export async function createServer(opts: { port?: number; host?: string } = {}) {
+export async function createServer(
+  opts: { port?: number; host?: string; claudeDesktopSync?: boolean } = {},
+) {
   const port = opts.port || 3456;
   const host = opts.host || '0.0.0.0';
   const app = Fastify({ logger: true });
+  const enableClaudeDesktopSync =
+    opts.claudeDesktopSync ?? process.env.NODE_ENV !== 'test';
+  const claudeDesktopSync: ClaudeDesktopAutoSyncController | undefined =
+    enableClaudeDesktopSync
+      ? startClaudeDesktopAutoSync({ logger: app.log })
+      : undefined;
 
   app.addHook('onRequest', async (req, reply) => {
     const ip = req.ip;
@@ -31,10 +44,17 @@ export async function createServer(opts: { port?: number; host?: string } = {}) 
   });
 
   await app.register(fastifyCors, { origin: true });
-  await app.register(sessionsRoutes);
+  await app.register(sessionsRoutes, { claudeDesktopSync });
   await app.register(memoryRoutes);
   await app.register(usageRoutes);
   await app.register(claudeArtifactsRoutes);
+  await app.register(claudeDesktopSyncRoutes, { claudeDesktopSync });
+  if (claudeDesktopSync) {
+    await claudeDesktopSync.ready;
+    app.addHook('onClose', async () => {
+      await claudeDesktopSync.stop();
+    });
+  }
 
   // Serve pre-built client from dist/client/ in production
   const clientDir = path.join(__dirname, '..', 'client');

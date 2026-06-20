@@ -8,6 +8,7 @@ import type {
   ClaudeRepairIssue,
   ClaudeRepairResult,
   ClaudeMessageDeleteResult,
+  ClaudeDesktopSyncStatus,
   ClaudeArtifactsOverview,
   ClaudeArtifactContent,
   ClaudeArtifactDeleteResult,
@@ -82,6 +83,12 @@ export const deleteSessionMessages = (
     method: 'POST',
     body: JSON.stringify({ messageIds, backup }),
   });
+
+export const getClaudeDesktopSyncStatus = (): Promise<ClaudeDesktopSyncStatus> =>
+  request('/claude-desktop-sync');
+
+export const runClaudeDesktopSync = (): Promise<ClaudeDesktopSyncStatus> =>
+  request('/claude-desktop-sync/run', { method: 'POST' });
 
 // ─── Memory ───────────────────────────────────────────────────────────────────
 

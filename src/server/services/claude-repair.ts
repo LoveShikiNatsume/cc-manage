@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import { randomUUID } from 'crypto';
+import type { Dirent } from 'fs';
 import type {
   ClaudeMessageDeleteResult,
   ClaudeRepairIssue,
@@ -12,6 +13,7 @@ import {
   extractClaudeSessionMeta,
   readHeadTail,
 } from './session-parser.js';
+import { withClaudeJsonlWriteLock } from './claude-jsonl-lock.js';
 
 const SYNTHETIC_TOOL_RESULT =
   '[cc-fix:synthetic placeholder] The original Claude Code session was interrupted or branched before this tool call produced a result.';
@@ -107,7 +109,7 @@ export async function scanClaudeRepairFile(filePath: string): Promise<ClaudeRepa
 }
 
 async function collectClaudeSessionFiles(projectsDir: string): Promise<string[]> {
-  let projects: fs.Dirent[];
+  let projects: Dirent[];
   try {
     projects = await fs.readdir(projectsDir, { withFileTypes: true });
   } catch {
@@ -118,7 +120,7 @@ async function collectClaudeSessionFiles(projectsDir: string): Promise<string[]>
   for (const project of projects) {
     if (!project.isDirectory()) continue;
     const projectDir = path.join(projectsDir, project.name);
-    let entries: fs.Dirent[];
+    let entries: Dirent[];
     try {
       entries = await fs.readdir(projectDir, { withFileTypes: true });
     } catch {
@@ -221,7 +223,7 @@ function dumpRow(row: any): string {
   return JSON.stringify(clean);
 }
 
-export async function repairClaudeSessionFile(
+async function repairClaudeSessionFileUnlocked(
   filePath: string,
   opts: {
     configDir?: string;
@@ -450,7 +452,19 @@ export async function repairClaudeSessionFile(
   return result;
 }
 
-export async function deleteClaudeSessionMessages(
+export async function repairClaudeSessionFile(
+  filePath: string,
+  opts: {
+    configDir?: string;
+    backup?: boolean;
+    dryRun?: boolean;
+    backupDir?: string;
+  } = {},
+): Promise<ClaudeRepairResult> {
+  return withClaudeJsonlWriteLock(() => repairClaudeSessionFileUnlocked(filePath, opts));
+}
+
+async function deleteClaudeSessionMessagesUnlocked(
   filePath: string,
   messageIds: string[],
   opts: { configDir?: string; backup?: boolean; backupDir?: string } = {},
@@ -521,7 +535,15 @@ export async function deleteClaudeSessionMessages(
   }
 }
 
-export async function restoreClaudeRepairBackup(
+export async function deleteClaudeSessionMessages(
+  filePath: string,
+  messageIds: string[],
+  opts: { configDir?: string; backup?: boolean; backupDir?: string } = {},
+): Promise<ClaudeMessageDeleteResult> {
+  return withClaudeJsonlWriteLock(() => deleteClaudeSessionMessagesUnlocked(filePath, messageIds, opts));
+}
+
+async function restoreClaudeRepairBackupUnlocked(
   filePath: string,
   opts: { configDir?: string; backupDir?: string } = {},
 ): Promise<void> {
@@ -529,4 +551,11 @@ export async function restoreClaudeRepairBackup(
   const backupPath = backupPathFor(filePath, opts.backupDir);
   await validatePath(backupPath, opts.configDir);
   await fs.copyFile(backupPath, filePath);
+}
+
+export async function restoreClaudeRepairBackup(
+  filePath: string,
+  opts: { configDir?: string; backupDir?: string } = {},
+): Promise<void> {
+  return withClaudeJsonlWriteLock(() => restoreClaudeRepairBackupUnlocked(filePath, opts));
 }

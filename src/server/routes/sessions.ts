@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify';
 import type { Provider, ProviderGroup, ProjectGroup, SessionMeta } from '@shared/types.js';
+import type { ClaudeDesktopAutoSyncController } from '../services/claude-desktop-sync/background.js';
 import {
   discoverClaudeSessions,
   getClaudeMessages,
@@ -17,10 +18,13 @@ import {
   repairClaudeSessionFile,
   scanClaudeRepairIssues,
 } from '../services/claude-repair.js';
+import { recordCliSessionDeleted } from '../services/claude-desktop-sync/state.js';
+import { withClaudeJsonlWriteLock } from '../services/claude-jsonl-lock.js';
 
 interface SessionsPluginOptions {
   claudeConfigDir?: string;
   codexConfigDir?: string;
+  claudeDesktopSync?: ClaudeDesktopAutoSyncController;
 }
 
 // In-memory map: "<provider>:<sessionId>" => filePath
@@ -83,7 +87,14 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
   app,
   opts,
 ) => {
-  const { claudeConfigDir, codexConfigDir } = opts;
+  const { claudeConfigDir, codexConfigDir, claudeDesktopSync } = opts;
+
+  const queueClaudeDesktopSync = (reason: string) => {
+    if (!claudeDesktopSync) return;
+    void claudeDesktopSync.requestSync(reason).catch(err => {
+      app.log.warn({ err }, 'Failed to request Claude Desktop sync');
+    });
+  };
 
   // GET /api/sessions
   app.get('/api/sessions', async (_req, reply) => {
@@ -122,6 +133,10 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
           error: err instanceof Error ? err.message : 'Unknown error',
         });
       }
+    }
+
+    if (results.some(result => result.ok)) {
+      queueClaudeDesktopSync('manage:repair-all');
     }
 
     return reply.send({ results });
@@ -172,6 +187,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     try {
       if (entry.provider === 'claude') {
         await renameClaudeSession(entry.filePath, title, claudeConfigDir);
+        queueClaudeDesktopSync('manage:rename-session');
       } else {
         await renameCodexSession(entry.filePath, title, codexConfigDir);
       }
@@ -208,6 +224,9 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
         configDir: claudeConfigDir,
         backup: req.body?.backup,
       });
+      if (result.ok) {
+        queueClaudeDesktopSync('manage:repair-session');
+      }
       return reply.send(result);
     } catch (err) {
       return reply
@@ -248,6 +267,9 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
         configDir: claudeConfigDir,
         backup: req.body?.backup,
       });
+      if (result.ok) {
+        queueClaudeDesktopSync('manage:delete-messages');
+      }
       return reply.send(result);
     } catch (err) {
       return reply
@@ -268,7 +290,14 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
 
     try {
       if (entry.provider === 'claude') {
-        await deleteClaudeSession(entry.filePath, claudeConfigDir);
+        await withClaudeJsonlWriteLock(async () => {
+          await deleteClaudeSession(entry.filePath, claudeConfigDir);
+          await recordCliSessionDeleted({
+            claudeHome: claudeConfigDir,
+            sessionId: id,
+          });
+        });
+        queueClaudeDesktopSync('manage:delete-session');
       } else {
         await deleteCodexSession(entry.filePath, codexConfigDir);
       }
@@ -292,6 +321,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     }
 
     const results: Array<{ provider: string; id: string; ok: boolean; error?: string }> = [];
+    let deletedClaudeSession = false;
 
     for (const { provider, id } of ids) {
       const entry = sessionMap.get(sessionKey(provider as Provider, id));
@@ -302,7 +332,14 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
 
       try {
         if (entry.provider === 'claude') {
-          await deleteClaudeSession(entry.filePath, claudeConfigDir);
+          await withClaudeJsonlWriteLock(async () => {
+            await deleteClaudeSession(entry.filePath, claudeConfigDir);
+            await recordCliSessionDeleted({
+              claudeHome: claudeConfigDir,
+              sessionId: id,
+            });
+          });
+          deletedClaudeSession = true;
         } else {
           await deleteCodexSession(entry.filePath, codexConfigDir);
         }
@@ -316,6 +353,10 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
           error: err instanceof Error ? err.message : 'Unknown error',
         });
       }
+    }
+
+    if (deletedClaudeSession) {
+      queueClaudeDesktopSync('manage:batch-delete');
     }
 
     return reply.send({ results });
