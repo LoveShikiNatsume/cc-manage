@@ -81,5 +81,9 @@ export function normalizeComparablePath(value) {
   if (typeof value !== "string" || !value.trim()) {
     return null;
   }
-  return path.resolve(value).replace(/[\\/]+$/, "").toLowerCase();
+  const trimmed = value.trim();
+  const normalized = isWindowsAbsolutePath(trimmed)
+    ? path.win32.normalize(trimmed)
+    : path.resolve(trimmed);
+  return normalized.replace(/[\\/]+$/, "").toLowerCase();
 }

@@ -30,7 +30,8 @@ export async function createServer(
   const host = opts.host || '0.0.0.0';
   const app = Fastify({ logger: true });
   const enableClaudeDesktopSync =
-    opts.claudeDesktopSync ?? process.env.NODE_ENV !== 'test';
+    opts.claudeDesktopSync ??
+    (process.platform === 'win32' && process.env.NODE_ENV !== 'test');
   const claudeDesktopSync: ClaudeDesktopAutoSyncController | undefined =
     enableClaudeDesktopSync
       ? startClaudeDesktopAutoSync({ logger: app.log })

@@ -31,7 +31,7 @@ function normalizePath(value) {
   }
   const trimmed = value.trim();
   return isWindowsAbsolutePath(trimmed)
-    ? path.resolve(trimmed)
+    ? path.win32.normalize(trimmed)
     : trimmed;
 }
 

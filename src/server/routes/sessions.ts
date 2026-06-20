@@ -292,10 +292,12 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
       if (entry.provider === 'claude') {
         await withClaudeJsonlWriteLock(async () => {
           await deleteClaudeSession(entry.filePath, claudeConfigDir);
-          await recordCliSessionDeleted({
-            claudeHome: claudeConfigDir,
-            sessionId: id,
-          });
+          if (claudeDesktopSync) {
+            await recordCliSessionDeleted({
+              claudeHome: claudeConfigDir,
+              sessionId: id,
+            });
+          }
         });
         queueClaudeDesktopSync('manage:delete-session');
       } else {
@@ -334,10 +336,12 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
         if (entry.provider === 'claude') {
           await withClaudeJsonlWriteLock(async () => {
             await deleteClaudeSession(entry.filePath, claudeConfigDir);
-            await recordCliSessionDeleted({
-              claudeHome: claudeConfigDir,
-              sessionId: id,
-            });
+            if (claudeDesktopSync) {
+              await recordCliSessionDeleted({
+                claudeHome: claudeConfigDir,
+                sessionId: id,
+              });
+            }
           });
           deletedClaudeSession = true;
         } else {
