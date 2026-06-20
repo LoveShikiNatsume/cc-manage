@@ -271,6 +271,7 @@ async function repairClaudeSessionFileUnlocked(
     dryRun?: boolean;
     backupDir?: string;
     force?: boolean;
+    preserveCompactions?: boolean;
   } = {},
 ): Promise<ClaudeRepairResult> {
   await validatePath(filePath, opts.configDir);
@@ -291,7 +292,11 @@ async function repairClaudeSessionFileUnlocked(
     };
   }
 
-  if (before.compactions > 0 && (before.hidden > 0 || before.roots > 1 || opts.force)) {
+  if (
+    before.compactions > 0 &&
+    !opts.preserveCompactions &&
+    (before.hidden > 0 || before.roots > 1 || opts.force)
+  ) {
     return {
       ok: false,
       filePath,
@@ -465,8 +470,26 @@ async function repairClaudeSessionFileUnlocked(
     inserted += 1;
   }
 
+  const relinkUuids = new Set(fixed.map(row => row.uuid));
   let parent: string | null = null;
   for (const row of fixed) {
+    if (opts.preserveCompactions && isCompactBoundary(row)) {
+      const physicalParentIsValid =
+        typeof row.parentUuid === 'string' && relinkUuids.has(row.parentUuid);
+      const logicalParentIsValid =
+        typeof row.logicalParentUuid === 'string' && relinkUuids.has(row.logicalParentUuid);
+
+      // A compact boundary deliberately starts a new physical tree. Preserve a
+      // valid physical link from Claude versions that provide one, but repair a
+      // logical link whose message was deleted to the nearest surviving node.
+      row.parentUuid = physicalParentIsValid ? row.parentUuid : null;
+      if (!logicalParentIsValid) {
+        if (parent) row.logicalParentUuid = parent;
+        else delete row.logicalParentUuid;
+      }
+      parent = row.uuid;
+      continue;
+    }
     row.parentUuid = parent;
     parent = row.uuid;
   }
@@ -551,9 +574,12 @@ async function deleteClaudeSessionMessagesUnlocked(
   await validatePath(filePath, opts.configDir);
 
   const before = await scanClaudeRepairFile(filePath);
-  if (before.compactions > 0) {
+  if (
+    before.compactions > 0 &&
+    (before.invalidCompactions > 0 || before.hidden > 0 || before.roots > 1)
+  ) {
     throw new Error(
-      'Message deletion is disabled for compacted Claude sessions because relinking could corrupt compact history.',
+      'Message deletion is disabled for this damaged compacted session until its compact boundaries are reviewed.',
     );
   }
 
@@ -563,6 +589,31 @@ async function deleteClaudeSessionMessagesUnlocked(
   }
 
   const rows = await loadJsonl(filePath);
+  const requestedRows = rows.filter(
+    row => row?.uuid && requested.has(row.uuid) && !row?.isSidechain,
+  );
+  if (requestedRows.some(row => row?.isCompactSummary)) {
+    throw new Error(
+      'Claude compact summary messages cannot be deleted because later messages depend on their context.',
+    );
+  }
+  if (before.compactions > 0) {
+    const firstBoundaryIndex = rows.findIndex(isCompactBoundary);
+    const hasSurvivingConversationBeforeBoundary = rows
+      .slice(0, firstBoundaryIndex)
+      .some(
+        row =>
+          isMain(row) &&
+          (row.type === 'user' || row.type === 'assistant') &&
+          !requested.has(row.uuid),
+      );
+    if (!hasSurvivingConversationBeforeBoundary) {
+      throw new Error(
+        'Cannot delete every message before the first compact boundary because it needs a surviving history anchor.',
+      );
+    }
+  }
+
   const deletedIds: string[] = [];
   const filteredRows = rows.filter(row => {
     if (
@@ -588,19 +639,26 @@ async function deleteClaudeSessionMessagesUnlocked(
     throw new Error('Cannot delete every user/assistant message in a session');
   }
 
-  const backupPath = opts.backup === false ? undefined : await createBackup(filePath, opts.backupDir);
   const tempPath = `${filePath}.cc-manage-${randomUUID()}.tmp.jsonl`;
 
   try {
     await fs.writeFile(tempPath, `${filteredRows.map(dumpRow).join('\n')}\n`, 'utf-8');
-    const repair = await repairClaudeSessionFile(tempPath, {
+    const repair = await repairClaudeSessionFileUnlocked(tempPath, {
       configDir: opts.configDir,
       backup: false,
       force: true,
+      preserveCompactions: before.compactions > 0,
     });
     if (!repair.ok) {
       throw new Error(repair.error ?? 'Claude session could not be repaired after message deletion');
     }
+    if (before.compactions > 0 && (repair.after?.invalidCompactions ?? 0) > 0) {
+      throw new Error(
+        'Message deletion was refused because it would leave an invalid compact boundary.',
+      );
+    }
+    const backupPath =
+      opts.backup === false ? undefined : await createBackup(filePath, opts.backupDir);
     const repairedContent = await fs.readFile(tempPath, 'utf-8');
     await fs.writeFile(filePath, repairedContent, 'utf-8');
 

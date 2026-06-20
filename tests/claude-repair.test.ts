@@ -227,13 +227,79 @@ describe('deleteClaudeSessionMessages', () => {
     expect(rows.find(row => row.type === 'last-prompt').leafUuid).toBe('u2');
   });
 
-  it('refuses message deletion when it would flatten compact history', async () => {
+  it('deletes a pre-compact message while preserving and relinking the compact boundary', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    const result = await deleteClaudeSessionMessages(sessionFile, ['a1'], { configDir });
+
+    expect(result.ok).toBe(true);
+    expect(result.deletedIds).toEqual(['a1']);
+    const rows = (await fs.readFile(sessionFile, 'utf-8'))
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(rows.some(row => row.uuid === 'a1')).toBe(false);
+    expect(rows.find(row => row.uuid === 'c1')).toMatchObject({
+      parentUuid: null,
+      logicalParentUuid: 'u1',
+      subtype: 'compact_boundary',
+      compactMetadata: { trigger: 'manual' },
+    });
+    expect(rows.find(row => row.uuid === 'u2')).toMatchObject({
+      parentUuid: 'c1',
+      isCompactSummary: true,
+    });
+    await expect(scanClaudeRepairFile(sessionFile)).resolves.toMatchObject({
+      roots: 1,
+      hidden: 0,
+      compactions: 1,
+      invalidCompactions: 0,
+    });
+  });
+
+  it('allows deleting a normal post-compact message and updates the leaf', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    const result = await deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir });
+
+    expect(result.ok).toBe(true);
+    const rows = (await fs.readFile(sessionFile, 'utf-8'))
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(rows.find(row => row.type === 'last-prompt').leafUuid).toBe('u2');
+    expect(rows.find(row => row.uuid === 'c1')).toMatchObject({
+      parentUuid: null,
+      logicalParentUuid: 'a1',
+    });
+  });
+
+  it('protects the compact summary message itself', async () => {
     await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
 
     await expect(
-      deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir }),
-    ).rejects.toThrow(/compact/i);
+      deleteClaudeSessionMessages(sessionFile, ['u2'], { configDir }),
+    ).rejects.toThrow(/compact summary/i);
     await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(COMPACTED_JSONL);
     await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('protects the last surviving history anchor before the first compact boundary', async () => {
+    await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    await expect(
+      deleteClaudeSessionMessages(sessionFile, ['u1', 'a1'], { configDir }),
+    ).rejects.toThrow(/history anchor/i);
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(COMPACTED_JSONL);
+    await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('still refuses deletion in a compacted session whose boundary is already broken', async () => {
+    await fs.writeFile(sessionFile, BROKEN_COMPACT_JSONL, 'utf-8');
+
+    await expect(
+      deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir }),
+    ).rejects.toThrow(/damaged compacted session/i);
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(BROKEN_COMPACT_JSONL);
   });
 });
