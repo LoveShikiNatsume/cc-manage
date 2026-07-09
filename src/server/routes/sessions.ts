@@ -141,11 +141,11 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     const issues = await scanClaudeRepairIssues(claudeConfigDir);
     const results = [];
 
-    for (const issue of issues) {
+    for (const issue of issues.filter(issue => issue.repairable)) {
       try {
         results.push(await repairClaudeSessionFile(issue.filePath, {
           configDir: claudeConfigDir,
-          backup: body?.backup,
+          backup: body?.backup ?? false,
         }));
       } catch (err) {
         results.push({
@@ -278,7 +278,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     try {
       const result = await repairClaudeSessionFile(entry.filePath, {
         configDir: claudeConfigDir,
-        backup: req.body?.backup,
+        backup: req.body?.backup ?? false,
       });
       if (result.ok && result.changed) {
         queueClaudeDesktopSync('manage:repair-session');
@@ -321,7 +321,7 @@ export const sessionsRoutes: FastifyPluginAsync<SessionsPluginOptions> = async (
     try {
       const result = await deleteClaudeSessionMessages(entry.filePath, messageIds, {
         configDir: claudeConfigDir,
-        backup: req.body?.backup,
+        backup: req.body?.backup ?? false,
       });
       if (result.ok) {
         queueClaudeDesktopSync('manage:delete-messages');

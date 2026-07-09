@@ -119,11 +119,13 @@ export async function scanClaudeRepairFile(filePath: string): Promise<ClaudeRepa
 
   const compactions = [...byUuid.values()].filter(isCompactBoundary);
   const invalidCompactions = compactions.filter(row => {
+    const hasPhysicalParent = typeof row.parentUuid === 'string' && row.parentUuid;
+    const hasLogicalParent = typeof row.logicalParentUuid === 'string' && row.logicalParentUuid;
     const physicalParentIsValid =
-      typeof row.parentUuid === 'string' && byUuid.has(row.parentUuid);
+      hasPhysicalParent && byUuid.has(row.parentUuid);
     const logicalParentIsValid =
-      typeof row.logicalParentUuid === 'string' && byUuid.has(row.logicalParentUuid);
-    return !physicalParentIsValid && !logicalParentIsValid;
+      hasLogicalParent && byUuid.has(row.logicalParentUuid);
+    return (hasPhysicalParent || hasLogicalParent) && !physicalParentIsValid && !logicalParentIsValid;
   }).length;
   const roots = [...byUuid.values()].filter(
     row => !byUuid.has(effectiveParentUuid(row, byUuid) ?? ''),
@@ -186,6 +188,8 @@ export async function scanClaudeRepairIssues(
   for (const filePath of files) {
     try {
       const stats = await scanClaudeRepairFile(filePath);
+      const compactOnly = stats.compactions > 0 && stats.invalidCompactions === 0;
+      if (compactOnly) continue;
       if (stats.hidden === 0 && stats.roots <= 1) continue;
 
       const { headLines, tailLines } = await readHeadTail(filePath);
@@ -292,11 +296,27 @@ async function repairClaudeSessionFileUnlocked(
     };
   }
 
-  if (
-    before.compactions > 0 &&
-    !opts.preserveCompactions &&
-    (before.hidden > 0 || before.roots > 1 || opts.force)
-  ) {
+  if (before.compactions > 0 && before.invalidCompactions === 0 && !opts.preserveCompactions) {
+    const main = rows.filter(isMain);
+    const leaf = [...main]
+      .reverse()
+      .find(row => row.type === 'assistant' || row.type === 'user')?.uuid ?? null;
+    return {
+      ok: true,
+      filePath,
+      dryRun: opts.dryRun,
+      before,
+      after: before,
+      changed: false,
+      mainNodes: new Set(main.map(row => row.uuid)).size,
+      relinked: 0,
+      inserted: 0,
+      droppedOrphans: 0,
+      leaf,
+    };
+  }
+
+  if (before.compactions > 0 && !opts.preserveCompactions) {
     return {
       ok: false,
       filePath,
@@ -511,7 +531,7 @@ async function repairClaudeSessionFileUnlocked(
 
   if (opts.dryRun) return result;
 
-  if (opts.backup !== false) {
+  if (opts.backup === true) {
     result.backupPath = await createBackup(filePath, opts.backupDir);
   }
 
@@ -576,7 +596,7 @@ async function deleteClaudeSessionMessagesUnlocked(
   const before = await scanClaudeRepairFile(filePath);
   if (
     before.compactions > 0 &&
-    (before.invalidCompactions > 0 || before.hidden > 0 || before.roots > 1)
+    before.invalidCompactions > 0
   ) {
     throw new Error(
       'Message deletion is disabled for this damaged compacted session until its compact boundaries are reviewed.',
@@ -658,7 +678,7 @@ async function deleteClaudeSessionMessagesUnlocked(
       );
     }
     const backupPath =
-      opts.backup === false ? undefined : await createBackup(filePath, opts.backupDir);
+      opts.backup === true ? await createBackup(filePath, opts.backupDir) : undefined;
     const repairedContent = await fs.readFile(tempPath, 'utf-8');
     await fs.writeFile(filePath, repairedContent, 'utf-8');
 

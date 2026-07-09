@@ -66,7 +66,7 @@ export const scanClaudeRepairs = (): Promise<ClaudeRepairIssue[]> =>
 export const repairSession = (
   provider: string,
   id: string,
-  backup = true,
+  backup = false,
 ): Promise<ClaudeRepairResult> =>
   request(`/sessions/${provider}/${encodeURIComponent(id)}/repair`, {
     method: 'POST',
@@ -74,7 +74,7 @@ export const repairSession = (
   });
 
 export const repairAllClaudeSessions = (
-  backup = true,
+  backup = false,
 ): Promise<{ results: ClaudeRepairResult[] }> =>
   request('/sessions/claude/repair-all', {
     method: 'POST',
@@ -85,7 +85,7 @@ export const deleteSessionMessages = (
   provider: string,
   id: string,
   messageIds: string[],
-  backup = true,
+  backup = false,
 ): Promise<ClaudeMessageDeleteResult> =>
   request(`/sessions/${provider}/${encodeURIComponent(id)}/messages/delete`, {
     method: 'POST',

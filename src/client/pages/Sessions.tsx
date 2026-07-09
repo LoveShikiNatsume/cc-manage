@@ -68,9 +68,10 @@ export default function Sessions() {
   const [messageSelectMode, setMessageSelectMode] = useState(false);
   const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
-  const [createBackups, setCreateBackups] = useState(true);
+  const [createBackups, setCreateBackups] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
   const [resourceCount, setResourceCount] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
   const msgEndRef = useRef<HTMLDivElement>(null);
 
@@ -78,8 +79,10 @@ export default function Sessions() {
     try {
       const data = await getSessions();
       setGroups(data);
+      return data;
     } catch (e) {
       console.error(e);
+      return null;
     }
   }, []);
 
@@ -131,6 +134,39 @@ export default function Sessions() {
       console.error(artifactResult.reason);
     }
     setLoadingMsgs(false);
+  };
+
+  const findSession = (data: ProviderGroup[], provider: string, id: string) => {
+    for (const group of data) {
+      if (group.provider !== provider) continue;
+      for (const project of group.projects) {
+        const found = project.sessions.find(session => session.id === id);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const refreshAll = async () => {
+    setRefreshing(true);
+    try {
+      const data = await load();
+      await scanRepairs();
+      if (!selectedSession || !data) return;
+      const freshSession = findSession(data, selectedSession.provider, selectedSession.id);
+      if (!freshSession) {
+        setSelectedSession(null);
+        setMessages([]);
+        setSelectedMessages(new Set());
+        setMessageSelectMode(false);
+        setResourceCount(null);
+        setMutationNotice('Selected session no longer exists.');
+        return;
+      }
+      await openSession(freshSession, { preserveNotice: true });
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const toggleCollapse = (key: string) => {
@@ -376,13 +412,13 @@ export default function Sessions() {
               </button>
             )}
             <button
-              onClick={scanRepairs}
-              disabled={repairBusy}
+              onClick={refreshAll}
+              disabled={repairBusy || refreshing}
               className="flex items-center gap-1.5 text-xs px-2 py-1 rounded text-gray-500 hover:text-gray-900 hover:bg-gray-100 disabled:opacity-50"
-              title="Scan Claude sessions for hidden branches"
+              title="Refresh sessions and the current conversation"
             >
-              <RefreshCw size={13} />
-              Scan
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+              Refresh
             </button>
             <button
               onClick={() => setCreateBackups(value => !value)}

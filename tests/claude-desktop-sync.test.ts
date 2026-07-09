@@ -89,18 +89,17 @@ describe('Claude Desktop sync', () => {
     await expect(fs.access(path.join(result.backupDir, 'metadata.json'))).resolves.toBeUndefined();
   });
 
-  it('backs up JSONL before appending a subscription visibility mirror', async () => {
+  it('does not append subscription visibility mirrors into the Claude Code JSONL', async () => {
     const fixture = await makeFixture();
     const jsonlPath = path.join(fixture.projectDir, 'session-api.jsonl');
     await writeCliSession(jsonlPath, 'session-api', 'claude-desktop-3p');
     await writeDesktopTemplate(fixture.scopeDir);
+    const before = await fs.readFile(jsonlPath, 'utf8');
 
     const result = await runSync({ ...fixture, target: 'subscription-view', apply: true });
 
-    expect(result.written).toContain(jsonlPath);
-    const text = await fs.readFile(jsonlPath, 'utf8');
-    expect(text).toContain('"entrypoint":"claude-desktop"');
-    expect(text).toContain('"visibilityMirror"');
+    expect(result.written).not.toContain(jsonlPath);
+    await expect(fs.readFile(jsonlPath, 'utf8')).resolves.toBe(before);
     expect(result.backupDir).toBeTruthy();
   });
 });

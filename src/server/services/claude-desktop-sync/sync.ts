@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { createBackup, createJsonlBackup } from "./backup.js";
+import { createBackup } from "./backup.js";
 import { collectCliSessions } from "./cli-sessions.js";
 import {
   defaultApiDesktopRoots,
@@ -130,49 +130,6 @@ function buildUpdatedDesktopSessionMetadata({ cliSession, desktopSession, option
   return current;
 }
 
-function cloneVisibilityRecord(record, targetEntrypoint) {
-  const cloned = structuredClone(record);
-  cloned.entrypoint = targetEntrypoint;
-  cloned.uuid = crypto.randomUUID();
-  if (cloned.promptId) {
-    cloned.promptId = crypto.randomUUID();
-  }
-  cloned.visibilityMirror = {
-    sourceEntrypoint: record.entrypoint,
-    createdBy: "claude-code-desktop-sync",
-    createdAt: new Date().toISOString()
-  };
-  return cloned;
-}
-
-async function buildSubscriptionVisibilityMirror({ cliSession, maxRecords = 2 }) {
-  if (hasEntrypoint(cliSession, "claude-desktop")) {
-    return [];
-  }
-  const text = await fs.readFile(cliSession.filePath, "utf8");
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  const records = [];
-  for (const line of lines) {
-    let record;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (record?.entrypoint !== "claude-desktop-3p") {
-      continue;
-    }
-    if (!["user", "attachment"].includes(record.type)) {
-      continue;
-    }
-    records.push(cloneVisibilityRecord(record, "claude-desktop"));
-    if (records.length >= maxRecords) {
-      break;
-    }
-  }
-  return records;
-}
-
 function needsRefresh({ cliSession, desktopSession, options = {} }) {
   const desired = desiredRefreshFields(cliSession, options);
   if (typeof desired.lastActivityAt === "number"
@@ -297,9 +254,8 @@ export async function planSync(options = {}) {
     const plannedWrites = [];
     for (const session of selectedSessions) {
       const existing = desktopByCliId.get(session.sessionId);
-      const records = await buildSubscriptionVisibilityMirror({ cliSession: session });
       if (existing) {
-        if (!needsRefresh({ cliSession: session, desktopSession: existing, options }) && records.length === 0) {
+        if (!needsRefresh({ cliSession: session, desktopSession: existing, options })) {
           continue;
         }
         const metadata = buildUpdatedDesktopSessionMetadata({
@@ -315,9 +271,7 @@ export async function planSync(options = {}) {
           title: metadata.title,
           targetDir: path.dirname(existing.filePath),
           targetPath: existing.filePath,
-          jsonlPath: records.length ? session.filePath : null,
           metadata,
-          appendRecords: records
         });
         continue;
       }
@@ -329,16 +283,14 @@ export async function planSync(options = {}) {
       });
       const targetDir = writeScope?.scopeDir ?? null;
       plannedWrites.push({
-        action: records.length ? "create+append-jsonl-visibility" : "create",
+        action: "create",
         cliSessionId: session.sessionId,
         cwd: session.cwd,
         model: metadata.model ?? null,
         title: metadata.title,
         targetDir,
         targetPath: targetDir ? path.join(targetDir, `${metadata.sessionId}.json`) : null,
-        jsonlPath: records.length ? session.filePath : null,
         metadata,
-        appendRecords: records
       });
     }
     const createCount = plannedWrites.filter((write) => write.action.startsWith("create")).length;
@@ -458,30 +410,14 @@ async function runSyncUnlocked(options = {}) {
       plannedWrites: plan.plannedWrites.map((write) => ({
         action: write.action,
         cliSessionId: write.cliSessionId,
-        targetPath: write.targetPath,
-        jsonlPath: write.jsonlPath ?? null,
-        appendCount: write.appendRecords?.length ?? 0
+        targetPath: write.targetPath
       }))
     });
     const written = [];
-    const jsonlWrites = plan.plannedWrites.filter((write) => write.jsonlPath && write.appendRecords?.length);
-    if (jsonlWrites.length) {
-      await createJsonlBackup({
-        claudeHome: plan.claudeHome,
-        plannedWrites: jsonlWrites.map((write) => ({ targetPath: write.jsonlPath }))
-      });
-    }
     for (const write of plan.plannedWrites) {
       await fs.mkdir(path.dirname(write.targetPath), { recursive: true });
       await fs.writeFile(write.targetPath, `${JSON.stringify(write.metadata, null, 2)}\n`, "utf8");
       written.push(write.targetPath);
-      const records = write.appendRecords ?? [];
-      if (records.length === 0) {
-        continue;
-      }
-      const text = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
-      await fs.appendFile(write.jsonlPath, text, "utf8");
-      written.push(write.jsonlPath);
     }
     return {
       ...plan,

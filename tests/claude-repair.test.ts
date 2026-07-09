@@ -36,6 +36,11 @@ const BROKEN_COMPACT_JSONL = COMPACTED_JSONL.replace(
   '"logicalParentUuid":"missing"',
 );
 
+const DETACHED_COMPACT_JSONL = COMPACTED_JSONL.replace(
+  ',"logicalParentUuid":"a1"',
+  '',
+);
+
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-repair-test-'));
   configDir = tmpDir;
@@ -83,6 +88,19 @@ describe('scanClaudeRepairFile', () => {
       invalidCompactions: 1,
     });
   });
+
+  it('treats a detached compact root without parent links as healthy compact history', async () => {
+    await fs.writeFile(sessionFile, DETACHED_COMPACT_JSONL, 'utf-8');
+
+    const stats = await scanClaudeRepairFile(sessionFile);
+
+    expect(stats).toMatchObject({
+      roots: 2,
+      hidden: 1,
+      compactions: 1,
+      invalidCompactions: 0,
+    });
+  });
 });
 
 describe('scanClaudeRepairIssues', () => {
@@ -98,6 +116,12 @@ describe('scanClaudeRepairIssues', () => {
 
   it('does not list a healthy compacted session', async () => {
     await fs.writeFile(sessionFile, COMPACTED_JSONL, 'utf-8');
+
+    await expect(scanClaudeRepairIssues(configDir)).resolves.toEqual([]);
+  });
+
+  it('does not list detached compact roots as repair issues', async () => {
+    await fs.writeFile(sessionFile, DETACHED_COMPACT_JSONL, 'utf-8');
 
     await expect(scanClaudeRepairIssues(configDir)).resolves.toEqual([]);
   });
@@ -119,8 +143,8 @@ describe('scanClaudeRepairIssues', () => {
 });
 
 describe('repairClaudeSessionFile', () => {
-  it('linearizes the main chain and creates a backup', async () => {
-    const result = await repairClaudeSessionFile(sessionFile, { configDir });
+  it('linearizes the main chain and creates a backup when backup is enabled', async () => {
+    const result = await repairClaudeSessionFile(sessionFile, { configDir, backup: true });
     expect(result.ok).toBe(true);
     expect(result.relinked).toBe(3);
     await expect(fs.access(`${sessionFile}.bak`)).resolves.toBeUndefined();
@@ -133,11 +157,8 @@ describe('repairClaudeSessionFile', () => {
     expect(assistantTwo.parentUuid).toBe('a1');
   });
 
-  it('can repair without creating a backup when backup is disabled', async () => {
-    const result = await repairClaudeSessionFile(sessionFile, {
-      configDir,
-      backup: false,
-    });
+  it('can repair without creating a backup by default', async () => {
+    const result = await repairClaudeSessionFile(sessionFile, { configDir });
 
     expect(result.ok).toBe(true);
     expect(result.backupPath).toBeUndefined();
@@ -151,6 +172,16 @@ describe('repairClaudeSessionFile', () => {
 
     expect(result).toMatchObject({ ok: true, changed: false, relinked: 0 });
     await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(COMPACTED_JSONL);
+    await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
+  });
+
+  it('leaves a detached compact root byte-for-byte unchanged', async () => {
+    await fs.writeFile(sessionFile, DETACHED_COMPACT_JSONL, 'utf-8');
+
+    const result = await repairClaudeSessionFile(sessionFile, { configDir });
+
+    expect(result).toMatchObject({ ok: true, changed: false, relinked: 0 });
+    await expect(fs.readFile(sessionFile, 'utf-8')).resolves.toBe(DETACHED_COMPACT_JSONL);
     await expect(fs.access(`${sessionFile}.bak`)).rejects.toThrow();
   });
 
@@ -178,7 +209,10 @@ describe('deleteClaudeSessionMessages', () => {
     ].join('\n') + '\n';
     await fs.writeFile(sessionFile, toolSession, 'utf-8');
 
-    const result = await deleteClaudeSessionMessages(sessionFile, ['u2'], { configDir });
+    const result = await deleteClaudeSessionMessages(sessionFile, ['u2'], {
+      configDir,
+      backup: true,
+    });
 
     expect(result.ok).toBe(true);
     expect(result.deletedIds).toEqual(['u2']);
@@ -197,11 +231,8 @@ describe('deleteClaudeSessionMessages', () => {
     expect(finalPrompt.leafUuid).toBe('a2');
   });
 
-  it('can delete messages without creating a backup when backup is disabled', async () => {
-    const result = await deleteClaudeSessionMessages(sessionFile, ['a1'], {
-      configDir,
-      backup: false,
-    });
+  it('can delete messages without creating a backup by default', async () => {
+    const result = await deleteClaudeSessionMessages(sessionFile, ['a1'], { configDir });
 
     expect(result.ok).toBe(true);
     expect(result.backupPath).toBeUndefined();
@@ -271,6 +302,23 @@ describe('deleteClaudeSessionMessages', () => {
     expect(rows.find(row => row.uuid === 'c1')).toMatchObject({
       parentUuid: null,
       logicalParentUuid: 'a1',
+    });
+  });
+
+  it('allows deleting a post-compact message from a detached compact root', async () => {
+    await fs.writeFile(sessionFile, DETACHED_COMPACT_JSONL, 'utf-8');
+
+    const result = await deleteClaudeSessionMessages(sessionFile, ['a2'], { configDir });
+
+    expect(result.ok).toBe(true);
+    const rows = (await fs.readFile(sessionFile, 'utf-8'))
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    expect(rows.find(row => row.type === 'last-prompt').leafUuid).toBe('u2');
+    expect(rows.find(row => row.uuid === 'c1')).toMatchObject({
+      parentUuid: null,
+      subtype: 'compact_boundary',
     });
   });
 
