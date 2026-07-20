@@ -52,6 +52,7 @@ export type ClaudeDesktopAutoSyncStatus = {
     archived: number;
     reconciled: number;
     skipped: number;
+    repaired: number;
   } | null;
 };
 
@@ -209,6 +210,7 @@ export function startClaudeDesktopAutoSync(
           archived: result.archived.length,
           reconciled: result.reconciled.length,
           skipped: result.skipped.length,
+          repaired: result.repaired.length,
         };
 
         if (!skippedBecauseRunning) {

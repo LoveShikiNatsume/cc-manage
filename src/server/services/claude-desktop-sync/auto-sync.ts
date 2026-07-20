@@ -9,8 +9,10 @@ import {
   defaultSubscriptionDesktopRoots
 } from "./constants.js";
 import { collectDesktopSessions } from "./desktop-sessions.js";
+import { writeJsonFileAtomic } from "./fs-util.js";
 import { localWorkspaceReason } from "./locality.js";
 import { isClaudeDesktopRunning } from "./process-state.js";
+import { applyCliSessionIdRepairs } from "./repair.js";
 import { runSync } from "./sync.js";
 import { loadSyncState, saveSyncState } from "./state.js";
 import { withClaudeJsonlWriteLock } from "../claude-jsonl-lock.js";
@@ -60,8 +62,7 @@ function differs(raw, patch) {
 }
 
 async function writeMetadata(session, raw, written) {
-  await fs.mkdir(path.dirname(session.filePath), { recursive: true });
-  await fs.writeFile(session.filePath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  await writeJsonFileAtomic(session.filePath, raw);
   written.push(session.filePath);
 }
 
@@ -138,14 +139,36 @@ async function runAutoSyncOnceUnlocked(options = {}) {
       archived: [],
       reconciled: [],
       skipped: [],
+      repaired: [],
+      unresolvedRepairs: [],
       apiResult: null,
       subscriptionResult: null
     };
   }
   const cli = await collectCliSessions(options);
   const state = await loadSyncState({ ...options, claudeHome: cli.claudeHome });
-  const apiDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultApiDesktopRoots() });
-  const subscriptionDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultSubscriptionDesktopRoots() });
+  let apiDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultApiDesktopRoots() });
+  let subscriptionDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultSubscriptionDesktopRoots() });
+
+  const apiRepair = await applyCliSessionIdRepairs({
+    claudeHome: cli.claudeHome,
+    desktopSessions: apiDesktop.sessions,
+    cliSessions: cli.sessions
+  });
+  const subscriptionRepair = await applyCliSessionIdRepairs({
+    claudeHome: cli.claudeHome,
+    desktopSessions: subscriptionDesktop.sessions,
+    cliSessions: cli.sessions
+  });
+  const repaired = [...apiRepair.repaired, ...subscriptionRepair.repaired];
+  const unresolvedRepairs = [...apiRepair.unresolved, ...subscriptionRepair.unresolved];
+  if (apiRepair.repaired.length > 0) {
+    apiDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultApiDesktopRoots() });
+  }
+  if (subscriptionRepair.repaired.length > 0) {
+    subscriptionDesktop = await collectDesktopSessions({ ...options, desktopRoots: defaultSubscriptionDesktopRoots() });
+  }
+
   const apiByCli = byCliSessionId(apiDesktop.sessions);
   const subscriptionByCli = byCliSessionId(subscriptionDesktop.sessions);
   const cliById = new Map(cli.sessions.map((session) => [session.sessionId, session]));
@@ -290,6 +313,8 @@ async function runAutoSyncOnceUnlocked(options = {}) {
     archived,
     reconciled,
     skipped,
+    repaired,
+    unresolvedRepairs,
     apiResult,
     subscriptionResult
   };
@@ -319,9 +344,9 @@ export async function watchAutoSync(options = {}) {
     try {
       if (shouldSync) {
         const result = await runAutoSyncOnce(options);
-        const changed = result.written.length + result.archived.length + result.reconciled.length;
+        const changed = result.written.length + result.archived.length + result.reconciled.length + result.repaired.length;
         syncedSinceClosed = true;
-        console.log(`[${new Date().toISOString()}] pass=${pass} claude=closed changed=${changed} written=${result.written.length} archived=${result.archived.length}`);
+        console.log(`[${new Date().toISOString()}] pass=${pass} claude=closed changed=${changed} written=${result.written.length} archived=${result.archived.length} repaired=${result.repaired.length}`);
       } else {
         console.log(`[${new Date().toISOString()}] pass=${pass} claude=${claudeRunning ? "running" : "closed"} waiting`);
       }

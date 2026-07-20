@@ -68,3 +68,11 @@ export async function copyDirectory(sourceDir, targetDir) {
 export function timestampSlug(date = new Date()) {
   return date.toISOString().replaceAll("-", "").replaceAll(":", "").replace(".", "");
 }
+
+export async function writeJsonFileAtomic(filePath, data) {
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  await fs.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  await fs.rename(tmpPath, filePath);
+}

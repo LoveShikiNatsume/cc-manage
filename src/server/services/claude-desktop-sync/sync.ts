@@ -1,6 +1,5 @@
 // @ts-nocheck
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
 
 import { createBackup } from "./backup.js";
@@ -10,9 +9,10 @@ import {
   defaultSubscriptionDesktopRoots
 } from "./constants.js";
 import {
-  chooseDesktopWriteScope,
+  listDesktopWriteScopes,
   collectDesktopSessions
 } from "./desktop-sessions.js";
+import { writeJsonFileAtomic } from "./fs-util.js";
 import {
   localWorkspaceReason,
   normalizeComparablePath
@@ -96,6 +96,25 @@ function buildDesktopSessionMetadata({ cliSession, template, options = {} }) {
     result.sessionPermissionUpdates = [];
   }
   return result;
+}
+
+function buildCreateWrites({ session, writeScopes, options = {} }) {
+  const metadata = buildDesktopSessionMetadata({
+    cliSession: session,
+    template: writeScopes[0]?.template,
+    options
+  });
+  const scopes = writeScopes.length > 0 ? writeScopes : [{ scopeDir: null }];
+  return scopes.map((scope) => ({
+    action: "create",
+    cliSessionId: session.sessionId,
+    cwd: session.cwd,
+    model: metadata.model ?? null,
+    title: metadata.title,
+    targetDir: scope.scopeDir ?? null,
+    targetPath: scope.scopeDir ? path.join(scope.scopeDir, `${metadata.sessionId}.json`) : null,
+    metadata
+  }));
 }
 
 function desiredRefreshFields(cliSession, options = {}) {
@@ -207,7 +226,8 @@ export async function planSync(options = {}) {
   const sourceDesktop = await collectDesktopSessions(sourceDesktopRootsForTarget(target, options));
   const desktopByCliId = newestDesktopSessionByCliId(desktop.sessions);
   const sourceDesktopByCliId = newestDesktopSessionByCliId(sourceDesktop.sessions);
-  const writeScope = chooseDesktopWriteScope(desktop);
+  const writeScopes = listDesktopWriteScopes(desktop);
+  const writeScope = writeScopes[0] ?? null;
 
   const entrypointCandidateSessions = cli.sessions
     .filter((session) => !excludedSessionIds.has(session.sessionId))
@@ -276,22 +296,7 @@ export async function planSync(options = {}) {
         continue;
       }
 
-      const metadata = buildDesktopSessionMetadata({
-        cliSession: session,
-        template: writeScope?.template,
-        options
-      });
-      const targetDir = writeScope?.scopeDir ?? null;
-      plannedWrites.push({
-        action: "create",
-        cliSessionId: session.sessionId,
-        cwd: session.cwd,
-        model: metadata.model ?? null,
-        title: metadata.title,
-        targetDir,
-        targetPath: targetDir ? path.join(targetDir, `${metadata.sessionId}.json`) : null,
-        metadata,
-      });
+      plannedWrites.push(...buildCreateWrites({ session, writeScopes, options }));
     }
     const createCount = plannedWrites.filter((write) => write.action.startsWith("create")).length;
     const updateCount = plannedWrites.filter((write) => write.action === "update").length;
@@ -299,6 +304,7 @@ export async function planSync(options = {}) {
       target,
       claudeHome: cli.claudeHome,
       writeScope,
+      writeScopes,
       missingCount: candidateSessions.length,
       candidateCount: candidateSessions.length,
       upToDateCount: 0,
@@ -313,9 +319,10 @@ export async function planSync(options = {}) {
     };
   }
 
+  const selectedSessions = candidateSessions.slice(0, limit);
   const plannedWrites = [];
   let upToDateCount = 0;
-  for (const session of candidateSessions) {
+  for (const session of selectedSessions) {
     const existing = desktopByCliId.get(session.sessionId);
     if (existing) {
       if (!needsRefresh({ cliSession: session, desktopSession: existing, options })) {
@@ -340,38 +347,23 @@ export async function planSync(options = {}) {
       continue;
     }
 
-    const metadata = buildDesktopSessionMetadata({
-      cliSession: session,
-      template: writeScope?.template,
-      options
-    });
-    const targetDir = writeScope?.scopeDir ?? null;
-    plannedWrites.push({
-      action: "create",
-      cliSessionId: session.sessionId,
-      cwd: session.cwd,
-      model: metadata.model ?? null,
-      title: metadata.title,
-      targetDir,
-      targetPath: targetDir ? path.join(targetDir, `${metadata.sessionId}.json`) : null,
-      metadata
-    });
+    plannedWrites.push(...buildCreateWrites({ session, writeScopes, options }));
   }
 
-  const selectedWrites = plannedWrites.slice(0, limit);
-  const createCount = selectedWrites.filter((write) => write.action === "create").length;
-  const updateCount = selectedWrites.filter((write) => write.action === "update").length;
+  const createCount = plannedWrites.filter((write) => write.action === "create").length;
+  const updateCount = plannedWrites.filter((write) => write.action === "update").length;
 
   return {
     target,
     claudeHome: cli.claudeHome,
     writeScope,
+    writeScopes,
     missingCount: candidateSessions.length,
     candidateCount: candidateSessions.length,
     upToDateCount,
     createCount,
     updateCount,
-    plannedWrites: selectedWrites,
+    plannedWrites,
     skippedNonLocalCount: skippedNonLocalSessions.length,
     skippedNonLocalSessions,
     blockedReason: writeScope?.scopeDir
@@ -405,8 +397,7 @@ async function runSyncUnlocked(options = {}) {
   if (plan.target === "subscription-view") {
     const backupDir = await createBackup({
       claudeHome: plan.claudeHome,
-      desktopRoot: plan.writeScope.desktopRoot,
-      scopeDir: plan.writeScope.scopeDir,
+      desktopRoots: plan.writeScopes.map((scope) => scope.desktopRoot),
       plannedWrites: plan.plannedWrites.map((write) => ({
         action: write.action,
         cliSessionId: write.cliSessionId,
@@ -415,8 +406,7 @@ async function runSyncUnlocked(options = {}) {
     });
     const written = [];
     for (const write of plan.plannedWrites) {
-      await fs.mkdir(path.dirname(write.targetPath), { recursive: true });
-      await fs.writeFile(write.targetPath, `${JSON.stringify(write.metadata, null, 2)}\n`, "utf8");
+      await writeJsonFileAtomic(write.targetPath, write.metadata);
       written.push(write.targetPath);
     }
     return {
@@ -439,8 +429,7 @@ async function runSyncUnlocked(options = {}) {
 
   const backupDir = await createBackup({
     claudeHome: plan.claudeHome,
-    desktopRoot: plan.writeScope.desktopRoot,
-    scopeDir: plan.writeScope.scopeDir,
+    desktopRoots: plan.writeScopes.map((scope) => scope.desktopRoot),
     plannedWrites: plan.plannedWrites.map((write) => ({
       cliSessionId: write.cliSessionId,
       targetPath: write.targetPath
@@ -449,8 +438,7 @@ async function runSyncUnlocked(options = {}) {
 
   const written = [];
   for (const write of plan.plannedWrites) {
-    await fs.mkdir(path.dirname(write.targetPath), { recursive: true });
-    await fs.writeFile(write.targetPath, `${JSON.stringify(write.metadata, null, 2)}\n`, "utf8");
+    await writeJsonFileAtomic(write.targetPath, write.metadata);
     written.push(write.targetPath);
   }
 

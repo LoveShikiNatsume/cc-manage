@@ -96,25 +96,40 @@ export async function collectDesktopSessions(options = {}) {
   };
 }
 
-export function chooseDesktopWriteScope(desktopSummary) {
-  const newestSession = desktopSummary.sessions
+// Every distinct <org>/<user> scope directory seen under this root collection,
+// newest-active first. A user can be logged into more than one account (e.g. two
+// subscription orgs), each with its own scope dir under the same root set — a
+// "create" write that only ever targets one of them silently orphans the others.
+export function listDesktopWriteScopes(desktopSummary) {
+  const byScopeDir = new Map();
+  const sessionsByRecency = desktopSummary.sessions
     .slice()
-    .sort((left, right) => (right.lastActivityAtMs ?? 0) - (left.lastActivityAtMs ?? 0))[0];
-  if (newestSession) {
-    return {
-      desktopRoot: newestSession.root,
-      scopeDir: newestSession.scopeDir,
-      template: newestSession.raw
-    };
+    .sort((left, right) => (right.lastActivityAtMs ?? 0) - (left.lastActivityAtMs ?? 0));
+  for (const session of sessionsByRecency) {
+    if (!session.scopeDir || byScopeDir.has(session.scopeDir)) {
+      continue;
+    }
+    byScopeDir.set(session.scopeDir, {
+      desktopRoot: session.root,
+      scopeDir: session.scopeDir,
+      template: session.raw
+    });
+  }
+  if (byScopeDir.size > 0) {
+    return [...byScopeDir.values()];
   }
 
   const presentRoot = desktopSummary.roots.find((root) => root.present && root.sessionsRoot);
   if (!presentRoot) {
-    return null;
+    return [];
   }
-  return {
+  return [{
     desktopRoot: presentRoot.root,
     scopeDir: null,
     template: null
-  };
+  }];
+}
+
+export function chooseDesktopWriteScope(desktopSummary) {
+  return listDesktopWriteScopes(desktopSummary)[0] ?? null;
 }

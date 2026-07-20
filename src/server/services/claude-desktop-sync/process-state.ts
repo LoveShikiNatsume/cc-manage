@@ -24,7 +24,8 @@ export async function listClaudeDesktopProcesses() {
     });
     return parseTasklistCsv(stdout)
       .filter((process) => /^claude(?:[- ]?3p)?\.exe$/i.test(process.imageName)
-        || /^claude desktop\.exe$/i.test(process.imageName));
+        || /^claude desktop\.exe$/i.test(process.imageName)
+        || /^claude[- ]?nest(?:[- ]?3p)?\.exe$/i.test(process.imageName));
   } catch {
     return [];
   }

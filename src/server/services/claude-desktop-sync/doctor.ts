@@ -4,8 +4,10 @@ import path from "node:path";
 import { collectCliSessions } from "./cli-sessions.js";
 import {
   chooseDesktopWriteScope,
-  collectDesktopSessions
+  collectDesktopSessions,
+  listDesktopWriteScopes
 } from "./desktop-sessions.js";
+import { planCliSessionIdRepairs } from "./repair.js";
 
 function normalizeComparablePath(value) {
   if (typeof value !== "string" || !value.trim()) {
@@ -75,6 +77,11 @@ export async function runDoctor(options = {}) {
     }));
 
   const writeScope = chooseDesktopWriteScope(desktop);
+  const writeScopes = listDesktopWriteScopes(desktop);
+  const cliSessionIdRepairPlan = planCliSessionIdRepairs({
+    desktopSessions: desktop.sessions,
+    cliSessions: cli.sessions
+  });
   return {
     cli: {
       claudeHome: cli.claudeHome,
@@ -132,12 +139,29 @@ export async function runDoctor(options = {}) {
     },
     missingDesktopSessions,
     orphanDesktopSessions,
+    repairableDesktopSessions: cliSessionIdRepairPlan.repairs.map((repair) => ({
+      filePath: repair.desktopSession.filePath,
+      title: repair.desktopSession.title,
+      cwd: repair.desktopSession.cwd,
+      candidateCliSessionId: repair.cliSessionId,
+      driftMs: repair.driftMs
+    })),
+    unrepairableDesktopSessions: cliSessionIdRepairPlan.unresolved.map((item) => ({
+      filePath: item.desktopSession.filePath,
+      title: item.desktopSession.title,
+      cwd: item.desktopSession.cwd,
+      reason: item.reason
+    })),
     writeScope: writeScope
       ? {
           desktopRoot: writeScope.desktopRoot,
           scopeDir: writeScope.scopeDir,
           hasTemplate: Boolean(writeScope.template)
         }
-      : null
+      : null,
+    writeScopes: writeScopes.map((scope) => ({
+      desktopRoot: scope.desktopRoot,
+      scopeDir: scope.scopeDir
+    }))
   };
 }

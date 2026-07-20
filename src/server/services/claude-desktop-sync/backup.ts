@@ -3,20 +3,22 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { BACKUP_NAMESPACE, defaultBackupRoot } from "./constants.js";
-import { copyDirectory, pathExists, timestampSlug } from "./fs-util.js";
+import { copyDirectory, timestampSlug } from "./fs-util.js";
 
-export async function createBackup({ claudeHome, desktopRoot, scopeDir, plannedWrites }) {
+export async function createBackup({ claudeHome, desktopRoots, plannedWrites }) {
   const backupRoot = defaultBackupRoot(claudeHome);
   const backupDir = path.join(backupRoot, timestampSlug());
   await fs.mkdir(backupDir, { recursive: true });
 
+  const roots = [...new Set((Array.isArray(desktopRoots) ? desktopRoots : [desktopRoots]).filter(Boolean))];
   const copied = [];
-  const desktopSessionsRoot = path.join(desktopRoot, "claude-code-sessions");
-  if (await copyDirectory(desktopSessionsRoot, path.join(backupDir, "desktop", "claude-code-sessions"))) {
-    copied.push(desktopSessionsRoot);
-  }
-  if (scopeDir && await pathExists(scopeDir)) {
-    copied.push(scopeDir);
+  for (let i = 0; i < roots.length; i += 1) {
+    const desktopRoot = roots[i];
+    const desktopSessionsRoot = path.join(desktopRoot, "claude-code-sessions");
+    const dirName = roots.length > 1 ? `desktop-${i}` : "desktop";
+    if (await copyDirectory(desktopSessionsRoot, path.join(backupDir, dirName, "claude-code-sessions"))) {
+      copied.push(desktopSessionsRoot);
+    }
   }
 
   const metadata = {
@@ -24,13 +26,21 @@ export async function createBackup({ claudeHome, desktopRoot, scopeDir, plannedW
     namespace: BACKUP_NAMESPACE,
     createdAt: new Date().toISOString(),
     claudeHome,
-    desktopRoot,
-    scopeDir,
+    desktopRoots: roots,
     copied,
     plannedWrites
   };
   await fs.writeFile(path.join(backupDir, "metadata.json"), JSON.stringify(metadata, null, 2), "utf8");
   return backupDir;
+}
+
+export async function backupSingleMetadataFile({ claudeHome, filePath, reason }) {
+  const backupRoot = defaultBackupRoot(claudeHome);
+  const backupDir = path.join(backupRoot, "metadata-repairs", timestampSlug());
+  await fs.mkdir(backupDir, { recursive: true });
+  const target = path.join(backupDir, `${reason}-${path.basename(filePath)}`);
+  await fs.copyFile(filePath, target);
+  return target;
 }
 
 export async function createJsonlBackup({ claudeHome, plannedWrites }) {

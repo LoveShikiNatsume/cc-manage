@@ -102,4 +102,44 @@ describe('Claude Desktop sync', () => {
     await expect(fs.readFile(jsonlPath, 'utf8')).resolves.toBe(before);
     expect(result.backupDir).toBeTruthy();
   });
+
+  it('mirrors a new CLI session into every known account scope dir, not just the newest one', async () => {
+    const fixture = await makeFixture();
+    await writeDesktopTemplate(fixture.scopeDir);
+    const scopeDirB = path.join(fixture.desktopRoot, 'claude-code-sessions', 'account-b', 'org-b');
+    await fs.mkdir(scopeDirB, { recursive: true });
+    await fs.writeFile(
+      path.join(scopeDirB, 'local_existing_b.json'),
+      `${JSON.stringify(
+        {
+          sessionId: 'local_existing_b',
+          cliSessionId: 'session-existing-b',
+          cwd: 'C:/Code/demo',
+          originCwd: 'C:/Code/demo',
+          createdAt: 1780000000000,
+          lastActivityAt: 1780000000000,
+          isArchived: false,
+          completedTurns: 1,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    await writeCliSession(
+      path.join(fixture.projectDir, 'session-missing.jsonl'),
+      'session-missing',
+      'claude-desktop',
+    );
+
+    const result = await runSync({ ...fixture, target: 'api-view', apply: true });
+
+    expect(result.written).toHaveLength(2);
+    expect(result.written.some((filePath: string) => filePath.startsWith(fixture.scopeDir))).toBe(true);
+    expect(result.written.some((filePath: string) => filePath.startsWith(scopeDirB))).toBe(true);
+    for (const filePath of result.written) {
+      const written = JSON.parse(await fs.readFile(filePath, 'utf8'));
+      expect(written.cliSessionId).toBe('session-missing');
+    }
+  });
 });
