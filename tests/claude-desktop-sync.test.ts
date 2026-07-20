@@ -103,7 +103,7 @@ describe('Claude Desktop sync', () => {
     expect(result.backupDir).toBeTruthy();
   });
 
-  it('mirrors a new CLI session into every known account scope dir, not just the newest one', async () => {
+  it('does not fan a new session out to an account Desktop has not reported as active', async () => {
     const fixture = await makeFixture();
     await writeDesktopTemplate(fixture.scopeDir);
     const scopeDirB = path.join(fixture.desktopRoot, 'claude-code-sessions', 'account-b', 'org-b');
@@ -132,14 +132,100 @@ describe('Claude Desktop sync', () => {
       'claude-desktop',
     );
 
+    // No lastKnownAccountUuid in config.json here -- with no explicit signal,
+    // sync should fall back to the single most-recently-active scope, not
+    // silently write into every account it happens to find.
     const result = await runSync({ ...fixture, target: 'api-view', apply: true });
 
-    expect(result.written).toHaveLength(2);
-    expect(result.written.some((filePath: string) => filePath.startsWith(fixture.scopeDir))).toBe(true);
-    expect(result.written.some((filePath: string) => filePath.startsWith(scopeDirB))).toBe(true);
-    for (const filePath of result.written) {
-      const written = JSON.parse(await fs.readFile(filePath, 'utf8'));
-      expect(written.cliSessionId).toBe('session-missing');
-    }
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0].startsWith(scopeDirB)).toBe(false);
+  });
+
+  it('targets the account Desktop reports as currently active (config.json lastKnownAccountUuid), even if another account has a more recent session', async () => {
+    const fixture = await makeFixture();
+    await writeDesktopTemplate(fixture.scopeDir); // account-a/org-a, lastActivityAt 1780000000000
+    const scopeDirB = path.join(fixture.desktopRoot, 'claude-code-sessions', 'account-b', 'org-b');
+    await fs.mkdir(scopeDirB, { recursive: true });
+    await fs.writeFile(
+      path.join(scopeDirB, 'local_existing_b.json'),
+      `${JSON.stringify(
+        {
+          sessionId: 'local_existing_b',
+          cliSessionId: 'session-existing-b',
+          cwd: 'C:/Code/demo',
+          originCwd: 'C:/Code/demo',
+          createdAt: 1790000000000,
+          lastActivityAt: 1790000000000, // more recent than account-a's session
+          isArchived: false,
+          completedTurns: 1,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
+    // Desktop's own config says account-a is the one actually in use, despite
+    // account-b having the more recently touched session file.
+    await fs.writeFile(
+      path.join(fixture.desktopRoot, 'config.json'),
+      `${JSON.stringify({ lastKnownAccountUuid: 'account-a' }, null, 2)}\n`,
+      'utf8',
+    );
+    await writeCliSession(
+      path.join(fixture.projectDir, 'session-missing.jsonl'),
+      'session-missing',
+      'claude-desktop',
+    );
+
+    const result = await runSync({ ...fixture, target: 'api-view', apply: true });
+
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0].startsWith(fixture.scopeDir)).toBe(true);
+    const written = JSON.parse(await fs.readFile(result.written[0], 'utf8'));
+    expect(written.cliSessionId).toBe('session-missing');
+  });
+
+  it('backfills a fresh copy into the active account when the only existing copy sits in an abandoned account', async () => {
+    const fixture = await makeFixture(); // account-a/org-a is the active account below
+    await writeDesktopTemplate(fixture.scopeDir); // active account already has at least one real session
+    const scopeDirB = path.join(fixture.desktopRoot, 'claude-code-sessions', 'account-b', 'org-b');
+    await fs.mkdir(scopeDirB, { recursive: true });
+    const staleRaw = {
+      sessionId: 'local_stale_in_b',
+      cliSessionId: 'session-stranded',
+      cwd: 'C:/Code/demo',
+      originCwd: 'C:/Code/demo',
+      createdAt: 1780000000000,
+      lastActivityAt: 1780000000000,
+      isArchived: false,
+      completedTurns: 1,
+    };
+    await fs.writeFile(
+      path.join(scopeDirB, 'local_stale_in_b.json'),
+      `${JSON.stringify(staleRaw, null, 2)}\n`,
+      'utf8',
+    );
+    await fs.writeFile(
+      path.join(fixture.desktopRoot, 'config.json'),
+      `${JSON.stringify({ lastKnownAccountUuid: 'account-a' }, null, 2)}\n`,
+      'utf8',
+    );
+    await writeCliSession(
+      path.join(fixture.projectDir, 'session-stranded.jsonl'),
+      'session-stranded',
+      'claude-desktop',
+    );
+
+    const result = await runSync({ ...fixture, target: 'api-view', apply: true });
+
+    // A fresh copy lands in the active account...
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0].startsWith(fixture.scopeDir)).toBe(true);
+    const written = JSON.parse(await fs.readFile(result.written[0], 'utf8'));
+    expect(written.cliSessionId).toBe('session-stranded');
+
+    // ...and the stale copy in the abandoned account is left completely untouched.
+    const stale = JSON.parse(await fs.readFile(path.join(scopeDirB, 'local_stale_in_b.json'), 'utf8'));
+    expect(stale).toEqual(staleRaw);
   });
 });

@@ -218,16 +218,39 @@ function newestDesktopSessionByCliId(sessions) {
   return result;
 }
 
+// Like newestDesktopSessionByCliId, but only considers entries that already
+// live in one of the given (active-account) scope dirs. A session whose only
+// existing copy sits in an account we're no longer targeting (e.g. one the
+// user stopped using) must still be treated as "missing" here, so it gets a
+// fresh copy created in the active account instead of being left stranded.
+function desktopSessionByCliIdWithinScopes(sessions, scopeDirs) {
+  const scopeSet = new Set(scopeDirs.filter(Boolean));
+  const result = new Map();
+  for (const session of sessions) {
+    if (!session.cliSessionId || !scopeSet.has(session.scopeDir)) {
+      continue;
+    }
+    const existing = result.get(session.cliSessionId);
+    if (!existing || (session.fileMtimeMs ?? 0) > (existing.fileMtimeMs ?? 0)) {
+      result.set(session.cliSessionId, session);
+    }
+  }
+  return result;
+}
+
 export async function planSync(options = {}) {
   const cli = await collectCliSessions(options);
   const target = options.target ?? "api-view";
   const excludedSessionIds = new Set(options.excludeSessionIds ?? []);
   const desktop = await collectDesktopSessions(desktopRootsForTarget(target, options));
   const sourceDesktop = await collectDesktopSessions(sourceDesktopRootsForTarget(target, options));
-  const desktopByCliId = newestDesktopSessionByCliId(desktop.sessions);
   const sourceDesktopByCliId = newestDesktopSessionByCliId(sourceDesktop.sessions);
   const writeScopes = listDesktopWriteScopes(desktop);
   const writeScope = writeScopes[0] ?? null;
+  const desktopByCliId = desktopSessionByCliIdWithinScopes(
+    desktop.sessions,
+    writeScopes.map((scope) => scope.scopeDir)
+  );
 
   const entrypointCandidateSessions = cli.sessions
     .filter((session) => !excludedSessionIds.has(session.sessionId))
