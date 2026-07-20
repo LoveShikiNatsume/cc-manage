@@ -2,10 +2,22 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import Database from 'better-sqlite3';
 import {
   discoverCodexSessions,
   deleteCodexSession,
+  renameCodexSession,
 } from '../src/server/providers/codex.js';
+
+const THREADS_TABLE_SQL = `CREATE TABLE threads (
+  id TEXT PRIMARY KEY,
+  rollout_path TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  preview TEXT NOT NULL DEFAULT '',
+  first_user_message TEXT NOT NULL DEFAULT '',
+  updated_at INTEGER,
+  updated_at_ms INTEGER
+)`;
 
 // A minimal valid Codex JSONL
 const SAMPLE_CODEX_JSONL = [
@@ -103,6 +115,118 @@ describe('discoverCodexSessions', () => {
     const archivedSession = sessions.find(s => s.filePath === archivedFile);
     expect(archivedSession).toBeDefined();
     expect(archivedSession?.id).toBe('archived-session-111');
+  });
+});
+
+describe('discoverCodexSessions with state_5.sqlite present', () => {
+  it('prefers a JSONL thread_name_updated rename over a stale SQLite title', async () => {
+    const renamedJsonl = `${SAMPLE_CODEX_JSONL.trimEnd()}\n${JSON.stringify({
+      timestamp: '2026-06-04T06:00:00.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'thread_name_updated',
+        thread_id: '019e9124-2875-72f2-bda8-2060565c8e68',
+        thread_name: 'Renamed Title',
+      },
+    })}\n`;
+    await fs.writeFile(sessionFile, renamedJsonl, 'utf-8');
+
+    const db = new Database(path.join(codexConfigDir, 'state_5.sqlite'));
+    db.exec(THREADS_TABLE_SQL);
+    db.prepare(
+      'INSERT INTO threads (id, rollout_path, title, preview, first_user_message) VALUES (?, ?, ?, ?, ?)',
+    ).run(
+      '019e9124-2875-72f2-bda8-2060565c8e68',
+      sessionFile,
+      'Fix the login bug', // stale: original raw first-message text, never updated after the rename
+      'Fix the login bug',
+      'Fix the login bug',
+    );
+    db.close();
+
+    const sessions = await discoverCodexSessions(codexConfigDir);
+    const session = sessions.find(s => s.filePath === sessionFile);
+    expect(session?.title).toBe('Renamed Title');
+  });
+
+  it('recovers a rename from session_index.jsonl even when it has scrolled past the tail window', async () => {
+    // Simulate a session that kept going long after being renamed, so the
+    // thread_name_updated event itself is no longer within the last 30 lines.
+    const followUps = Array.from({ length: 40 }, (_, i) =>
+      JSON.stringify({
+        timestamp: `2026-06-04T07:${String(i).padStart(2, '0')}:00.000Z`,
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `follow up ${i}` }] },
+      }),
+    ).join('\n');
+    const renamedThenBuriedJsonl = `${SAMPLE_CODEX_JSONL.trimEnd()}\n${JSON.stringify({
+      timestamp: '2026-06-04T06:00:00.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'thread_name_updated',
+        thread_id: '019e9124-2875-72f2-bda8-2060565c8e68',
+        thread_name: 'Buried Rename',
+      },
+    })}\n${followUps}\n`;
+    await fs.writeFile(sessionFile, renamedThenBuriedJsonl, 'utf-8');
+
+    await fs.appendFile(
+      path.join(codexConfigDir, 'session_index.jsonl'),
+      `${JSON.stringify({
+        id: '019e9124-2875-72f2-bda8-2060565c8e68',
+        thread_name: 'Buried Rename',
+        updated_at: '2026-06-04T06:00:00.000Z',
+      })}\n`,
+      'utf-8',
+    );
+
+    const sessions = await discoverCodexSessions(codexConfigDir);
+    const session = sessions.find(s => s.filePath === sessionFile);
+    expect(session?.title).toBe('Buried Rename');
+  });
+
+  it('falls back to SQLite preview/first_user_message when JSONL has no usable title and SQLite title is empty', async () => {
+    // The only user-role message is system content (AGENTS.md), so JSONL alone would produce 'Untitled'.
+    const jsonl = [
+      '{"timestamp":"2026-06-04T05:38:46.641Z","type":"session_meta","payload":{"id":"019e9124-2875-72f2-bda8-2060565c8e68","cwd":"/home/user/project"}}',
+      '{"timestamp":"2026-06-04T05:39:01.618Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\\nstuff"}]}}',
+    ].join('\n') + '\n';
+    await fs.writeFile(sessionFile, jsonl, 'utf-8');
+
+    const db = new Database(path.join(codexConfigDir, 'state_5.sqlite'));
+    db.exec(THREADS_TABLE_SQL);
+    db.prepare(
+      'INSERT INTO threads (id, rollout_path, title, preview, first_user_message) VALUES (?, ?, ?, ?, ?)',
+    ).run('019e9124-2875-72f2-bda8-2060565c8e68', sessionFile, '', 'Clean preview from Codex', 'Clean preview from Codex');
+    db.close();
+
+    const sessions = await discoverCodexSessions(codexConfigDir);
+    const session = sessions.find(s => s.filePath === sessionFile);
+    expect(session?.title).toBe('Clean preview from Codex');
+  });
+});
+
+describe('renameCodexSession', () => {
+  it('updates the threads row via an extended-length-prefixed rollout_path when id does not match', async () => {
+    const dbPath = path.join(codexConfigDir, 'state_5.sqlite');
+    const db = new Database(dbPath);
+    db.exec(THREADS_TABLE_SQL);
+    const extendedPath = `\\\\?\\${path.resolve(sessionFile)}`;
+    db.prepare('INSERT INTO threads (id, rollout_path, title) VALUES (?, ?, ?)').run(
+      'a-different-thread-id-not-in-jsonl',
+      extendedPath,
+      'Old Title',
+    );
+    db.close();
+
+    await renameCodexSession(sessionFile, 'Brand New Title', codexConfigDir);
+
+    const verifyDb = new Database(dbPath, { readonly: true });
+    const row = verifyDb
+      .prepare('SELECT title FROM threads WHERE id = ?')
+      .get('a-different-thread-id-not-in-jsonl') as { title: string } | undefined;
+    verifyDb.close();
+    expect(row?.title).toBe('Brand New Title');
   });
 });
 

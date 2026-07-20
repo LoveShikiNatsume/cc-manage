@@ -89,6 +89,32 @@ describe('Claude Desktop sync', () => {
     await expect(fs.access(path.join(result.backupDir, 'metadata.json'))).resolves.toBeUndefined();
   });
 
+  it('caps a long custom-title at TITLE_MAX_CHARS when writing Desktop metadata', async () => {
+    const fixture = await makeFixture();
+    const longTitle = 'x'.repeat(200);
+    const filePath = path.join(fixture.projectDir, 'session-long-title.jsonl');
+    const records = [
+      { type: 'queue-operation', operation: 'init', timestamp: '2026-06-11T00:00:00.000Z', sessionId: 'session-long-title' },
+      {
+        type: 'user',
+        timestamp: '2026-06-11T00:00:01.000Z',
+        sessionId: 'session-long-title',
+        cwd: 'C:/Code/demo',
+        message: { role: 'user', content: 'continue the work' },
+        entrypoint: 'claude-desktop',
+      },
+      { type: 'custom-title', customTitle: longTitle, sessionId: 'session-long-title' },
+    ];
+    await fs.writeFile(filePath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`, 'utf8');
+    await writeDesktopTemplate(fixture.scopeDir);
+
+    const result = await runSync({ ...fixture, target: 'api-view', apply: true });
+
+    expect(result.written).toHaveLength(1);
+    const written = JSON.parse(await fs.readFile(result.written[0], 'utf8'));
+    expect(written.title.length).toBe(80);
+  });
+
   it('does not append subscription visibility mirrors into the Claude Code JSONL', async () => {
     const fixture = await makeFixture();
     const jsonlPath = path.join(fixture.projectDir, 'session-api.jsonl');

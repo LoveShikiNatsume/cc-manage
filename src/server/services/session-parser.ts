@@ -7,11 +7,11 @@ function fileBaseName(filePath: string): string {
   return filePath.split(/[\\/]+/).pop() ?? '';
 }
 
-const HEAD_LINES = 20;
+const HEAD_LINES = 40;
 const TAIL_LINES = 30;
 const SMALL_FILE_THRESHOLD = 64 * 1024;
 const BUFFER_SIZE = 64 * 1024;
-const TITLE_MAX_CHARS = 80;
+export const TITLE_MAX_CHARS = 80;
 
 export interface HeadTailResult {
   headLines: string[];
@@ -93,6 +93,21 @@ function extractTimestamp(obj: any): number | null {
   return null;
 }
 
+// Shared priority resolver reused by Claude CLI, Codex, and Claude Desktop
+// sync, so all three surfaces derive a displayed title the same way instead
+// of drifting apart (they used to: different truncation lengths, different
+// fallback values, different handling of slash-command-only messages).
+export function resolveTitleFromCandidates(candidates: Array<string | null | undefined>): string | null {
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (trimmed && !trimmed.startsWith('/')) {
+      return trimmed.slice(0, TITLE_MAX_CHARS);
+    }
+  }
+  return null;
+}
+
 // --- Claude ---
 
 export function extractClaudeSessionMeta(
@@ -101,7 +116,7 @@ export function extractClaudeSessionMeta(
   filePath: string,
 ): SessionMeta {
   let id = '';
-  let title = '';
+  let firstUserMessage: string | null = null;
   let cwd = '';
   let lastActivity = 0;
 
@@ -113,9 +128,9 @@ export function extractClaudeSessionMeta(
       id = obj.sessionId;
     }
 
-    if (obj.type === 'user' && obj.message?.content && !title) {
+    if (obj.type === 'user' && obj.message?.content && firstUserMessage === null) {
       const text = extractTextContent(obj.message.content);
-      if (text) title = text.slice(0, TITLE_MAX_CHARS);
+      if (text) firstUserMessage = text;
     }
 
     if (obj.cwd && !cwd) cwd = obj.cwd;
@@ -124,21 +139,19 @@ export function extractClaudeSessionMeta(
     if (ts && ts > lastActivity) lastActivity = ts;
   }
 
-  let hasCustomTitle = false;
-  let hasAiTitle = false;
+  let customTitle: string | null = null;
+  let aiTitle: string | null = null;
   for (let i = tailLines.length - 1; i >= 0; i--) {
     const obj = safeParseJSON(tailLines[i]);
     if (!obj) continue;
 
-    const customTitle = obj.customTitle ?? obj.title;
-    if (obj.type === 'custom-title' && typeof customTitle === 'string' && !hasCustomTitle) {
-      title = customTitle.slice(0, TITLE_MAX_CHARS);
-      hasCustomTitle = true;
+    const candidateCustomTitle = obj.customTitle ?? obj.title;
+    if (obj.type === 'custom-title' && typeof candidateCustomTitle === 'string' && customTitle === null) {
+      customTitle = candidateCustomTitle;
     }
 
-    if (obj.type === 'ai-title' && obj.aiTitle && !hasCustomTitle && !hasAiTitle) {
-      title = obj.aiTitle.slice(0, TITLE_MAX_CHARS);
-      hasAiTitle = true;
+    if (obj.type === 'ai-title' && obj.aiTitle && customTitle === null && aiTitle === null) {
+      aiTitle = obj.aiTitle;
     }
 
     const ts = extractTimestamp(obj);
@@ -150,7 +163,7 @@ export function extractClaudeSessionMeta(
   return {
     id: id || fileBaseName(filePath).replace('.jsonl', '') || 'unknown',
     provider: 'claude',
-    title: title || 'Untitled',
+    title: resolveTitleFromCandidates([customTitle, aiTitle, firstUserMessage]) ?? 'Untitled',
     project,
     cwd,
     lastActivity,
@@ -206,6 +219,68 @@ function extractCodexUserPrompt(text: string): string | null {
   return text.trim();
 }
 
+export interface CodexTitleCandidates {
+  /** Most recent `thread_name_updated` rename event found in the tail. */
+  threadNameUpdated: string | null;
+  /** `session_meta.payload.thread_name`, in practice almost always absent. */
+  sessionMetaThreadName: string | null;
+  /** First real (non-system, non-empty) user prompt found in the head. */
+  firstUserPrompt: string | null;
+}
+
+// Exported separately from extractCodexSessionMeta so callers with extra
+// signals (codex.ts, which also has a SQLite title/preview/first_user_message
+// index) can splice those in at the right priority instead of this function's
+// JSONL-only result being unconditionally overwritten after the fact.
+export function extractCodexTitleCandidates(headLines: string[], tailLines: string[]): CodexTitleCandidates {
+  let sessionMetaThreadName: string | null = null;
+  let firstUserPrompt: string | null = null;
+
+  for (const line of headLines) {
+    const obj = safeParseJSON(line);
+    if (!obj) continue;
+
+    if (
+      obj.type === 'session_meta' &&
+      obj.payload &&
+      typeof obj.payload.thread_name === 'string' &&
+      sessionMetaThreadName === null
+    ) {
+      sessionMetaThreadName = obj.payload.thread_name;
+    }
+
+    if (
+      obj.type === 'response_item' &&
+      obj.payload?.role === 'user' &&
+      obj.payload?.content &&
+      firstUserPrompt === null
+    ) {
+      const text = extractTextContent(obj.payload.content);
+      if (text) {
+        const prompt = extractCodexUserPrompt(text);
+        if (prompt) firstUserPrompt = prompt;
+      }
+    }
+  }
+
+  let threadNameUpdated: string | null = null;
+  for (let i = tailLines.length - 1; i >= 0; i--) {
+    const obj = safeParseJSON(tailLines[i]);
+    if (!obj) continue;
+
+    if (
+      obj.type === 'event_msg' &&
+      obj.payload?.type === 'thread_name_updated' &&
+      typeof obj.payload.thread_name === 'string' &&
+      threadNameUpdated === null
+    ) {
+      threadNameUpdated = obj.payload.thread_name;
+    }
+  }
+
+  return { threadNameUpdated, sessionMetaThreadName, firstUserPrompt };
+}
+
 export function extractCodexSessionMeta(
   headLines: string[],
   tailLines: string[],
@@ -213,7 +288,6 @@ export function extractCodexSessionMeta(
 ): SessionMeta {
   let id = '';
   let cwd = '';
-  let title = '';
   let lastActivity = 0;
 
   for (const line of headLines) {
@@ -223,53 +297,27 @@ export function extractCodexSessionMeta(
     if (obj.type === 'session_meta' && obj.payload) {
       if (obj.payload.id && !id) id = obj.payload.id;
       if (obj.payload.cwd && !cwd) cwd = obj.payload.cwd;
-      if (typeof obj.payload.thread_name === 'string' && !title) {
-        title = obj.payload.thread_name.slice(0, TITLE_MAX_CHARS);
-      }
-    }
-
-    if (
-      obj.type === 'response_item' &&
-      obj.payload?.role === 'user' &&
-      obj.payload?.content &&
-      !title
-    ) {
-      const text = extractTextContent(obj.payload.content);
-      if (text) {
-        const prompt = extractCodexUserPrompt(text);
-        if (prompt) title = prompt.slice(0, TITLE_MAX_CHARS);
-      }
     }
 
     const ts = obj.timestamp ? new Date(obj.timestamp).getTime() : null;
     if (ts && ts > lastActivity) lastActivity = ts;
   }
 
-  let hasThreadName = false;
   for (let i = tailLines.length - 1; i >= 0; i--) {
     const obj = safeParseJSON(tailLines[i]);
     if (!obj) continue;
 
-    if (
-      obj.type === 'event_msg' &&
-      obj.payload?.type === 'thread_name_updated' &&
-      typeof obj.payload.thread_name === 'string' &&
-      !hasThreadName
-    ) {
-      title = obj.payload.thread_name.slice(0, TITLE_MAX_CHARS);
-      hasThreadName = true;
-    }
-
     const ts = obj.timestamp ? new Date(obj.timestamp).getTime() : null;
     if (ts && ts > lastActivity) lastActivity = ts;
   }
 
+  const { threadNameUpdated, sessionMetaThreadName, firstUserPrompt } = extractCodexTitleCandidates(headLines, tailLines);
   const project = projectNameFromCwd(cwd) || 'unknown';
 
   return {
     id: id || fileBaseName(filePath).replace('.jsonl', '') || 'unknown',
     provider: 'codex',
-    title: title || 'Untitled',
+    title: resolveTitleFromCandidates([threadNameUpdated, sessionMetaThreadName, firstUserPrompt]) ?? 'Untitled',
     project,
     cwd,
     lastActivity,

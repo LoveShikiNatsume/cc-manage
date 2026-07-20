@@ -97,6 +97,23 @@ describe('extractClaudeSessionMeta', () => {
     const meta = extractClaudeSessionMeta(headLines, tailLines, '/path/file.jsonl');
     expect(meta.lastActivity).toBe(new Date('2026-06-01T03:00:00.000Z').getTime());
   });
+
+  it('falls back to Untitled instead of a slash command when the only signal is one', () => {
+    const headLines = [
+      '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"/compact"}]},"cwd":"/proj","timestamp":"2026-06-01T02:40:06.000Z","sessionId":"abc-123"}',
+    ];
+    const meta = extractClaudeSessionMeta(headLines, [], '/path/to/file.jsonl');
+    expect(meta.title).toBe('Untitled');
+  });
+
+  it('truncates a long first message to TITLE_MAX_CHARS', () => {
+    const longText = 'x'.repeat(200);
+    const headLines = [
+      `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"${longText}"}]},"cwd":"/proj","timestamp":"2026-06-01T02:40:06.000Z","sessionId":"abc-123"}`,
+    ];
+    const meta = extractClaudeSessionMeta(headLines, [], '/path/to/file.jsonl');
+    expect(meta.title.length).toBe(80);
+  });
 });
 
 describe('extractCodexSessionMeta', () => {

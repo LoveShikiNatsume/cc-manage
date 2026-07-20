@@ -8,6 +8,7 @@ import {
   listDesktopWriteScopes
 } from "./desktop-sessions.js";
 import { planCliSessionIdRepairs } from "./repair.js";
+import { resolveTitleFromCandidates } from "../session-parser.js";
 
 function normalizeComparablePath(value) {
   if (typeof value !== "string" || !value.trim()) {
@@ -63,7 +64,12 @@ export async function runDoctor(options = {}) {
       userMessages: session.userMessages,
       assistantMessages: session.assistantMessages,
       filePath: session.filePath,
-      suggestedTitle: session.historyDisplay ?? session.lastPromptPreview ?? null
+      suggestedTitle: resolveTitleFromCandidates([
+        session.title,
+        session.historyDisplay,
+        session.firstPromptPreview,
+        session.lastPromptPreview
+      ])
     }));
 
   const orphanDesktopSessions = desktop.sessions
@@ -100,7 +106,7 @@ export async function runDoctor(options = {}) {
         cwd: session.cwd,
         model: session.model,
         entrypoints: session.entrypoints,
-        title: session.title ?? session.historyDisplay ?? session.firstPromptPreview ?? null,
+        title: resolveTitleFromCandidates([session.title, session.historyDisplay, session.firstPromptPreview]),
         lastActivityAtMs: session.lastActivityAtMs,
         filePath: session.filePath
       })),
@@ -109,7 +115,7 @@ export async function runDoctor(options = {}) {
         cwd: session.cwd,
         model: session.model,
         entrypoints: session.entrypoints,
-        title: session.title ?? session.historyDisplay ?? session.firstPromptPreview ?? null,
+        title: resolveTitleFromCandidates([session.title, session.historyDisplay, session.firstPromptPreview]),
         lastActivityAtMs: session.lastActivityAtMs,
         filePath: session.filePath
       })),
@@ -118,7 +124,7 @@ export async function runDoctor(options = {}) {
         cwd: session.cwd,
         model: session.model,
         entrypoints: session.entrypoints,
-        title: session.title ?? session.historyDisplay ?? session.firstPromptPreview ?? null,
+        title: resolveTitleFromCandidates([session.title, session.historyDisplay, session.firstPromptPreview]),
         lastActivityAtMs: session.lastActivityAtMs,
         filePath: session.filePath
       }))

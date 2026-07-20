@@ -18,6 +18,7 @@ import {
   normalizeComparablePath
 } from "./locality.js";
 import { withClaudeJsonlWriteLock } from "../claude-jsonl-lock.js";
+import { resolveTitleFromCandidates } from "../session-parser.js";
 
 function nowMs() {
   return Date.now();
@@ -28,17 +29,12 @@ function localSessionId() {
 }
 
 function titleFromSession(session) {
-  for (const candidate of [
+  return resolveTitleFromCandidates([
     session.title,
     session.historyDisplay,
     session.firstPromptPreview,
     session.lastPromptPreview
-  ]) {
-    if (typeof candidate === "string" && candidate.trim() && !candidate.trim().startsWith("/")) {
-      return candidate;
-    }
-  }
-  return `Imported CLI session ${session.sessionId.slice(0, 8)}`;
+  ]) ?? `Imported CLI session ${session.sessionId.slice(0, 8)}`;
 }
 
 function hasEntrypoint(session, entrypoint) {
